@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from sogi.core.task_spec import TaskSpec
-from sogi.repository.provider import RepositoryProvider
+from sogi.repository.provider import RepositoryProvider, Symbol
 
 from .budget import estimate_tokens, truncate_to_tokens
 from .ranking import RankedContext, rank_symbol, render_symbol
@@ -64,6 +64,34 @@ class CompiledContext:
             },
             "suggested_next_investigation": self.suggested_next_investigation,
         }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> CompiledContext:
+        task = TaskSpec.from_dict(payload["task"])
+        selected = tuple(
+            RankedContext(
+                symbol=Symbol(**item["symbol"]),
+                semantic_relevance=float(item["semantic_relevance"]),
+                dependency_relevance=float(item["dependency_relevance"]),
+                test_relevance=float(item["test_relevance"]),
+                risk_relevance=float(item["risk_relevance"]),
+                score=float(item["score"]),
+                token_cost=int(item["token_cost"]),
+            )
+            for item in payload.get("context", [])
+        )
+        metrics = payload.get("metrics", {})
+        return cls(
+            task=task,
+            selected=selected,
+            related_files=tuple(str(path) for path in payload.get("related_files", ())),
+            related_tests=tuple(str(path) for path in payload.get("related_tests", ())),
+            repository_estimated_tokens=int(metrics.get("repository_estimated_tokens", 0)),
+            candidate_tokens=int(metrics.get("candidate_tokens", 0)),
+            selected_tokens=int(metrics.get("selected_tokens", 0)),
+            token_budget=int(metrics.get("token_budget", 0)),
+            suggested_next_investigation=str(payload.get("suggested_next_investigation", "")),
+        )
 
     def render(self) -> str:
         criteria = _render_list(self.task.acceptance_criteria, "Not explicitly provided")

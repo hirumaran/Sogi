@@ -60,3 +60,12 @@ class TaskSpec:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> TaskSpec:
+        return cls(
+            objective=str(payload["objective"]),
+            acceptance_criteria=tuple(str(item) for item in payload.get("acceptance_criteria", ())),
+            constraints=tuple(str(item) for item in payload.get("constraints", ())),
+            concepts=tuple(str(item) for item in payload.get("concepts", ())),
+        )

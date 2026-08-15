@@ -10,39 +10,103 @@ boundary.
 
 ## Current milestone
 
-This repository contains the first vertical slice:
+Sogi now persists complete engineering sessions as **runs**:
 
-- deterministic `TaskSpec` and engineering phases;
-- persistent JSON `EngineeringState`;
-- an abstract repository provider;
-- a Tree-sitter Analyzer CLI adapter;
-- weighted context ranking and a hard token budget;
-- a usable `sogi context` command;
-- a tiny end-to-end fixture and focused tests.
+- a `RunRecord` binds `TaskSpec`, `EngineeringState`, compiled context, and telemetry;
+- every observable event is appended to an append-only event log (the source of truth);
+- runs persist to SQLite (`.sogi/sogi.db`) with a human-readable JSON snapshot per run;
+- `sogi run start/show/events/list` and `sogi context --run` drive the lifecycle;
+- an MCP server exposes `understand_task`, `get_context`, `get_state`, and
+  `record_decision` so a coding agent can use Sogi as an external control plane.
 
 ## Quick start
 
 The sibling `tree-sitter-analyzer/` checkout is used automatically during local
 development when its `.venv` exists. For a clean installation, install Sogi with
-its analyzer extra:
+its analyzer and MCP extras:
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install -e '.[analyzer,dev]'
+.venv/bin/pip install -e '.[analyzer,mcp,dev]'
 ```
 
-Compile context for a repository:
+### Start a run
 
 ```bash
-sogi context "Fix expired refresh-token redirect" \
+sogi run start "Fix expired refresh-token redirect" \
   --repo examples/demo_repo \
   --criterion "Expired refresh tokens redirect to /login" \
   --constraint "Do not change valid-session behavior" \
   --budget 1200
 ```
 
-Use `--format json` for machine-readable output. Sogi incrementally prepares the
-analyzer index by default; pass `--no-index` only when a valid index already exists.
+This creates a run, compiles focused context, and prints a summary:
+
+```text
+Run: 7d3f21
+
+Objective:
+Fix expired refresh-token redirect
+
+Phase:
+INVESTIGATE
+
+Acceptance criteria:
+1
+
+Context budget:
+1200
+
+Context selected:
+243 tokens
+```
+
+### Inspect a run
+
+```bash
+sogi run show 7d3f21        # full engineering state
+sogi run events 7d3f21      # append-only event log
+sogi run list               # all runs
+sogi context --run 7d3f21   # compile/refresh context for a run
+```
+
+Use `--format json` on any command for machine-readable output. Everything
+persists across restarts under the repository root:
+
+```text
+.sogi/
+├── sogi.db      # SQLite: runs table (JSON payload) + events table
+└── runs/        # human-readable JSON snapshot per run
+```
+
+### Use Sogi from Claude Code (MCP)
+
+```bash
+sogi mcp --repo .
+```
+
+Register it in Claude Code's MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "sogi": {
+      "command": "sogi",
+      "args": ["mcp", "--repo", "."]
+    }
+  }
+}
+```
+
+An agent can then call the four tools in sequence:
+
+```text
+1. understand_task("Fix expired refresh-token redirect", ...)
+2. get_context()
+3. investigate / edit
+4. record_decision("Handle expiration in refresh middleware ...")
+5. get_state()
+```
 
 ## Design boundary
 
@@ -59,6 +123,18 @@ TaskSpec + EngineeringState + TokenBudget
           TreeSitterProvider (adapter)
 ```
 
-The next milestone is to persist a task run, expose the core through MCP, and add
-the first deterministic governor checks. See [docs/roadmap.md](docs/roadmap.md).
+Runs add a control-plane layer on top:
 
+```text
+events (append-only)
+   ↓
+RunRecord state
+   ↓
+RunService (lifecycle)
+   ↓
+CLI + MCP
+```
+
+The next milestone is to add deterministic governor checks (repeated-read,
+repeated-failure, scope-expansion) and an independent verification command.
+See [docs/roadmap.md](docs/roadmap.md).

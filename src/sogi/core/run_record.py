@@ -1,0 +1,150 @@
+"""RunRecord: the object representing one Sogi-supervised engineering session.
+
+A RunRecord binds the deterministic task specification, the mutable engineering
+state, the compiled repository context, and operational telemetry into a single
+persistable unit. Every future subsystem (governor, verifier, MCP) operates on
+a ``run_id`` and reads or mutates the record through :class:`RunService`.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from sogi.context.compiler import CompiledContext
+from sogi.core.task_spec import TaskSpec
+from sogi.state.engineering_state import EngineeringState
+
+#: Verification statuses are deliberately non-binary so evidence can be
+#: reported as defensibly unknown rather than forced into pass/fail.
+SATISFIED = "SATISFIED"
+VIOLATED = "VIOLATED"
+UNVERIFIED = "UNVERIFIED"
+VERIFICATION_STATUSES = frozenset({SATISFIED, VIOLATED, UNVERIFIED})
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass(frozen=True)
+class CommandRecord:
+    """One command execution observed during a run."""
+
+    command: str
+    started_at: str
+    finished_at: str | None = None
+    exit_code: int | None = None
+    result: str | None = None
+    success: bool | None = None
+
+
+@dataclass(frozen=True)
+class WarningRecord:
+    """A Sogi intervention (governor check, failed context compile, ...)."""
+
+    kind: str
+    message: str
+    timestamp: str = field(default_factory=_now)
+
+
+@dataclass(frozen=True)
+class VerificationRecord:
+    """Evidence mapped back to one acceptance criterion."""
+
+    criterion: str
+    status: str
+    evidence: tuple[str, ...] = ()
+    timestamp: str = field(default_factory=_now)
+
+    def __post_init__(self) -> None:
+        if self.status not in VERIFICATION_STATUSES:
+            raise ValueError(f"Invalid verification status: {self.status!r}")
+
+
+@dataclass
+class Telemetry:
+    """Operational observations that are not part of engineering state."""
+
+    files_read: list[str] = field(default_factory=list)
+    files_modified: list[str] = field(default_factory=list)
+    commands: list[CommandRecord] = field(default_factory=list)
+    warnings: list[WarningRecord] = field(default_factory=list)
+    verification: list[VerificationRecord] = field(default_factory=list)
+    context_compilations: int = 0
+    context_budget: int = 4000
+    context_tokens: list[int] = field(default_factory=list)
+    started_at: str = field(default_factory=_now)
+    completed_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "files_read": list(self.files_read),
+            "files_modified": list(self.files_modified),
+            "commands": [asdict(item) for item in self.commands],
+            "warnings": [asdict(item) for item in self.warnings],
+            "verification": [asdict(item) for item in self.verification],
+            "context_compilations": self.context_compilations,
+            "context_budget": self.context_budget,
+            "context_tokens": list(self.context_tokens),
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> Telemetry:
+        return cls(
+            files_read=list(payload.get("files_read", [])),
+            files_modified=list(payload.get("files_modified", [])),
+            commands=[CommandRecord(**item) for item in payload.get("commands", [])],
+            warnings=[WarningRecord(**item) for item in payload.get("warnings", [])],
+            verification=[
+                VerificationRecord(
+                    **{**item, "evidence": tuple(item.get("evidence", ()))}
+                )
+                for item in payload.get("verification", [])
+            ],
+            context_compilations=int(payload.get("context_compilations", 0)),
+            context_budget=int(payload.get("context_budget", 4000)),
+            context_tokens=list(payload.get("context_tokens", [])),
+            started_at=str(payload.get("started_at", _now())),
+            completed_at=payload.get("completed_at"),
+        )
+
+
+@dataclass
+class RunRecord:
+    """One complete Sogi-supervised engineering session."""
+
+    run_id: str
+    task: TaskSpec
+    state: EngineeringState
+    context: CompiledContext | None = None
+    telemetry: Telemetry = field(default_factory=Telemetry)
+    created_at: str = field(default_factory=_now)
+    updated_at: str = field(default_factory=_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "task": self.task.to_dict(),
+            "state": self.state.to_dict(),
+            "context": self.context.to_dict() if self.context else None,
+            "telemetry": self.telemetry.to_dict(),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> RunRecord:
+        context = payload.get("context")
+        return cls(
+            run_id=str(payload["run_id"]),
+            task=TaskSpec.from_dict(payload["task"]),
+            state=EngineeringState.from_dict(payload["state"]),
+            context=CompiledContext.from_dict(context) if context else None,
+            telemetry=Telemetry.from_dict(payload.get("telemetry", {})),
+            created_at=str(payload.get("created_at", _now())),
+            updated_at=str(payload.get("updated_at", _now())),
+        )
