@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sogi"
+version = "0.1.0"
+description = "A software-engineering control plane for coding agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Sogi contributors" }]
+keywords = ["coding-agents", "context-engineering", "developer-tools", "tree-sitter"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+analyzer = ["tree-sitter-analyzer>=1.29,<2"]
+dev = [
+  "pytest>=8.0,<10",
+  "pytest-cov>=5,<8",
+  "ruff>=0.5,<1",
+]
+
+[project.scripts]
+sogi = "sogi.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sogi"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+

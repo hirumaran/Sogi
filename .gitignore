@@ -1,0 +1,19 @@
+.DS_Store
+.pytest_cache/
+.coverage
+.ruff_cache/
+.mypy_cache/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.sogi/
+.ast-cache/
+
+# Local infrastructure checkout. Sogi consumes the published package/CLI.
+tree-sitter-analyzer/
+
+# Analyzer state created in the demo repository.
+examples/demo_repo/.ast-cache/
