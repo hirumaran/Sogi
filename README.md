@@ -28,7 +28,12 @@ Sogi now covers a trustworthy, closed control-plane loop:
 - the **independent verifier** discovers repository-declared checks (pytest/ruff/mypy,
   npm scripts, Makefile targets, cargo) or explicit `.sogi.toml` commands, executes
   them, and maps evidence to each acceptance criterion as SATISFIED / VIOLATED /
-  UNVERIFIED — it never equates "tests passed" with "every requirement proven";
+  UNVERIFIED — pytest runs are captured as JUnit reports, so criteria are proven by
+  *executed passing test node IDs*, not filename similarity; a skipped relevant test
+  stays UNVERIFIED even when the suite exits green;
+- **observation provenance**: every recorded event carries host, session id, tool
+  name, and source (`host_hook` vs `agent_reported`), so any stored observation can
+  prove where it came from;
 - a **verification watermark** (event sequence + content-sensitive worktree
   fingerprint) rejects stale `verify → edit → complete` sequences at the gate;
 - **usage metrics** capture host-reported tokens/cost with explicit provenance, plus

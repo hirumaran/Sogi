@@ -81,8 +81,21 @@ Remaining in M4:
 
 1. Real Claude Code end-to-end trial (hooks + MCP together) on a live session.
 2. Full multi-session run binding beyond the newest-run fallback.
-3. Evidence providers richer than filename matching (test node IDs, coverage).
+3. Evidence providers beyond pytest/JUnit: coverage, static analysis, type-check,
+   build artifacts; manual-evidence entry with explicit provenance.
 4. Sandboxed/restricted check execution policy.
+
+Completed within M4 since the last update:
+
+12. Observation provenance: every file/command event carries host, session_id,
+    tool_name, hook_event_name, and observation_source (`host_hook` vs
+    `agent_reported`), persisted in event payloads — stored observations can
+    prove where they came from.
+13. Structured verification evidence: pytest commands are instrumented with JUnit
+    XML reports and parsed into executed test node IDs. Criterion status is now
+    driven by executed identities: a matching passing test proves SATISFIED, a
+    failing one VIOLATED, a skipped one stays UNVERIFIED even when the suite
+    exits green. File-level mapping remains only as a labeled fallback.
 
 ## Later phases (deliberately not started)
 
