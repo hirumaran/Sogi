@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-from fakes import FakeProvider
+from fakes import FakeProvider, exit_command
 
 from sogi.cli import main
 from sogi.events.replay import compare_with_snapshot, replay
@@ -33,7 +33,9 @@ def _exercise(service: RunService) -> str:
     service.command_finished(run_id, "pytest tests/", exit_code=0, success=True)
     service.command_finished(run_id, "make lint", exit_code=1, success=False)
     service.acknowledge(run_id, "scope_expansion", "billing/charge.py")
-    service.verify(run_id, checks=(DiscoveredCheck(name="t", command="exit 0", kind="test"),))
+    service.verify(
+        run_id, checks=(DiscoveredCheck(name="t", command=exit_command(0), kind="test"),)
+    )
     return run_id
 
 

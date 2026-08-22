@@ -31,6 +31,11 @@ Sogi now covers a trustworthy, closed control-plane loop:
   UNVERIFIED — pytest runs are captured as JUnit reports, so criteria are proven by
   *executed passing test node IDs*, not filename similarity; a skipped relevant test
   stays UNVERIFIED even when the suite exits green;
+- verification commands cross a restricted launch-policy boundary: no shell
+  interpretation, a constrained executable set, filtered environment variables,
+  bounded output capture, and process-group termination on timeout. This is not an
+  OS/container sandbox—repository tests still execute repository code, so hostile
+  repositories require an additional isolation layer;
 - **observation provenance**: every recorded event carries host, session id, tool
   name, and source (`host_hook` vs `agent_reported`), so any stored observation can
   prove where it came from;

@@ -83,7 +83,10 @@ Remaining in M4:
 2. Full multi-session run binding beyond the newest-run fallback.
 3. Evidence providers beyond pytest/JUnit: coverage, static analysis, type-check,
    build artifacts; manual-evidence entry with explicit provenance.
-4. Sandboxed/restricted check execution policy.
+4. OS/container sandboxing for hostile repositories. The local verifier now has a
+   restricted launch policy (no shell, executable validation, filtered environment,
+   bounded output, process-group timeout termination), but repository test code still
+   has the host user's filesystem and network privileges.
 
 Completed within M4 since the last update:
 

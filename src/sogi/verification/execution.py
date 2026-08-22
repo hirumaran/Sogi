@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import BinaryIO
 
 PASSED = "passed"
 FAILED = "failed"
@@ -162,19 +163,22 @@ class ExecutionPolicy:
         executable = argv[0]
         basename = Path(executable).name
         allowed_name = basename in self.allowed_executables or basename.startswith("python")
-        resolved = _resolve_executable(executable, root)
-        inside_repository = resolved is not None and _is_relative_to(resolved, root)
+        launch_path = _resolve_executable(executable, root)
+        inside_repository = launch_path is not None and _is_relative_to(launch_path.resolve(), root)
         if not allowed_name and not inside_repository:
             return ExecutionResult(
                 BLOCKED,
                 output_tail=f"executable {executable!r} is not allowed by verification policy",
             )
-        if resolved is None:
+        if launch_path is None:
             return ExecutionResult(
                 UNAVAILABLE,
                 output_tail=f"executable unavailable: {executable}",
             )
-        argv[0] = str(resolved)
+        # Preserve virtual-environment and shim paths for launch. Resolving a
+        # symlink such as .venv/bin/python to its base interpreter would lose
+        # that environment's installed packages.
+        argv[0] = str(launch_path)
         return argv, _sanitized_environment(self.environment_keys)
 
 
@@ -184,30 +188,27 @@ def _resolve_executable(executable: str, root: Path) -> Path | None:
         if not candidate.is_absolute():
             candidate = root / candidate
         try:
-            resolved = candidate.resolve(strict=True)
+            candidate.resolve(strict=True)
         except OSError:
             return None
-        return resolved if resolved.is_file() else None
+        return candidate.absolute() if candidate.is_file() else None
     found = shutil.which(executable)
-    return Path(found).resolve() if found else None
+    return Path(found).absolute() if found else None
 
 
 def _sanitized_environment(keys: frozenset[str]) -> dict[str, str]:
     environment = {key: value for key, value in os.environ.items() if key in keys}
-    environment.update(
-        {key: value for key, value in os.environ.items() if key.startswith("LC_")}
-    )
+    environment.update({key: value for key, value in os.environ.items() if key.startswith("LC_")})
     environment["SOGI_VERIFICATION"] = "1"
     return environment
 
 
-def _read_tail(output: object, limit: int) -> str:
-    handle = output
-    handle.flush()  # type: ignore[attr-defined]
-    handle.seek(0, os.SEEK_END)  # type: ignore[attr-defined]
-    size = handle.tell()  # type: ignore[attr-defined]
-    handle.seek(max(0, size - max(1, limit)))  # type: ignore[attr-defined]
-    return handle.read().decode("utf-8", errors="replace")  # type: ignore[attr-defined,no-any-return]
+def _read_tail(output: BinaryIO, limit: int) -> str:
+    output.flush()
+    output.seek(0, os.SEEK_END)
+    size = output.tell()
+    output.seek(max(0, size - max(1, limit)))
+    return output.read().decode("utf-8", errors="replace")
 
 
 def _kill_process_group(process: subprocess.Popen[bytes]) -> None:

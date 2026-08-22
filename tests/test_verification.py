@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from fakes import exit_command
 
 from sogi.cli import main
 from sogi.context.compiler import CompiledContext
@@ -178,8 +179,8 @@ def test_criteria_untouched_by_failing_lint() -> None:
 # -- verifier execution -------------------------------------------------------
 
 
-PASS_CHECK = check("pass", "exit 0", "test")
-FAIL_CHECK = check("fail", "exit 3", "test")
+PASS_CHECK = check("pass", exit_command(0), "test")
+FAIL_CHECK = check("fail", exit_command(3), "test")
 
 
 def test_verifier_runs_checks_and_reports_pass(tmp_path: Path) -> None:
@@ -212,6 +213,18 @@ def test_verifier_unknown_command_is_unavailable_not_failure(tmp_path: Path) -> 
     report = Verifier(tmp_path).verify(make_record(), checks=(bogus,))
     assert report.outcome == "INCONCLUSIVE"
     assert report.checks[0].success is None
+    assert report.checks[0].execution_status == "blocked"
+    assert "not allowed" in report.checks[0].output_tail
+
+
+def test_verifier_render_surfaces_execution_policy_reason(tmp_path: Path) -> None:
+    blocked = check("unsafe", "python -V && touch escaped", "test")
+
+    report = Verifier(tmp_path).verify(make_record(), checks=(blocked,))
+
+    rendered = report.render()
+    assert "[blocked]" in rendered
+    assert "shell operator" in rendered
 
 
 def test_verifier_tool_missing_does_not_fail_criteria(tmp_path: Path) -> None:
@@ -234,7 +247,7 @@ def test_verifier_render_shows_checks_and_criteria(tmp_path: Path) -> None:
     record = make_record(criteria=("Expired tokens redirect to /login",))
     report = Verifier(tmp_path).verify(record, checks=(PASS_CHECK,))
     text = report.render()
-    assert "[x] pass: exit 0" in text
+    assert f"[x] pass: {exit_command(0)}" in text
     assert "UNVERIFIED: Expired tokens redirect to /login" in text
 
 
@@ -261,7 +274,7 @@ def test_service_verify_persists_evidence(service: RunService) -> None:
         acceptance_criteria=("Auth behavior works",),
     ).run_id
 
-    report = service.verify(run_id, checks=(check("t", "exit 0", "test"),))
+    report = service.verify(run_id, checks=(check("t", exit_command(0), "test"),))
 
     assert report.outcome == "PASS"
     record = service.get(run_id)
@@ -278,7 +291,7 @@ def test_service_verify_failed_check_records_violated(service: RunService) -> No
         acceptance_criteria=("Auth behavior works",),
     ).run_id
 
-    report = service.verify(run_id, checks=(check("t", "exit 1", "test"),))
+    report = service.verify(run_id, checks=(check("t", exit_command(1), "test"),))
 
     record = service.get(run_id)
     assert report.outcome == "FAIL"

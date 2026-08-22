@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from fakes import exit_command
 
 from sogi.runs.service import CompletionGateError, RunService
 
@@ -43,7 +44,7 @@ def git_repo(tmp_path: Path) -> Path:
 def _passing() -> tuple:
     from sogi.verification.discovery import DiscoveredCheck
 
-    return (DiscoveredCheck(name="t", command="exit 0", kind="test"),)
+    return (DiscoveredCheck(name="t", command=exit_command(0), kind="test"),)
 
 
 def test_verify_on_clean_tree_raises_no_findings(git_repo: Path) -> None:

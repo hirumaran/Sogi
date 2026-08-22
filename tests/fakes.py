@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import shlex
+import sys
 from pathlib import Path
 from typing import Any
 
 from sogi.repository.provider import RepositoryProvider, RepositorySnapshot, Symbol
+
+
+def exit_command(code: int) -> str:
+    """Portable no-shell command that exits with an exact status."""
+    program = f"raise SystemExit({code})"
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(program)}"
 
 
 class FakeProvider(RepositoryProvider):

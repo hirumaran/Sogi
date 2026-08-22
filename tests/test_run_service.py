@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from fakes import FakeProvider
+from fakes import FakeProvider, exit_command
 
 from sogi.core.phases import EngineeringPhase
 from sogi.runs.service import RunNotFoundError, RunService
@@ -191,7 +191,7 @@ def test_complete_blocked_by_failed_verification(repo: Path) -> None:
     service = RunService(repo)
     run_id = service.start("Fix auth", compile_context=False).run_id
 
-    failing = DiscoveredCheck(name="t", command="exit 1", kind="test")
+    failing = DiscoveredCheck(name="t", command=exit_command(1), kind="test")
     report = service.verify(run_id, checks=(failing,))
     # An objectively failing repository check is FAIL, not INCONCLUSIVE,
     # even when no acceptance criteria exist to map evidence onto.
@@ -231,7 +231,7 @@ def test_complete_passes_gate_after_successful_verification(service: RunService)
     with pytest.raises(CompletionGateError):
         service.complete(run_id)
 
-    passing = DiscoveredCheck(name="t", command="exit 0", kind="test")
+    passing = DiscoveredCheck(name="t", command=exit_command(0), kind="test")
     service.verify(run_id, checks=(passing,))
 
     # Context was never compiled, so the criterion maps as unverified; the
@@ -316,7 +316,7 @@ def test_complete_rejected_when_files_change_after_verify(repo: Path) -> None:
         compile_context=False,
     ).run_id
 
-    passing = DiscoveredCheck(name="t", command="exit 0", kind="test")
+    passing = DiscoveredCheck(name="t", command=exit_command(0), kind="test")
     service.verify(run_id, checks=(passing,))
 
     # The agent edits after verification: evidence is now stale.
@@ -342,7 +342,7 @@ def test_verification_snapshot_records_watermark(service: RunService) -> None:
 
     service.verify(
         run_id,
-        checks=(DiscoveredCheck(name="t", command="exit 0", kind="test"),),
+        checks=(DiscoveredCheck(name="t", command=exit_command(0), kind="test"),),
     )
 
     snapshot = service.get(run_id).telemetry.verification_snapshot

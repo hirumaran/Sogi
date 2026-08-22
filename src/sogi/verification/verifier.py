@@ -22,6 +22,7 @@ from .execution import ExecutionPolicy
 #: Truncate captured output so reports stay readable and storage stays small.
 _OUTPUT_TAIL_CHARS = 2000
 
+
 @dataclass(frozen=True)
 class CheckResult:
     """The outcome of executing one discovered check."""
@@ -80,7 +81,10 @@ class VerificationReport:
         for result in self.checks:
             mark = _mark(result.success)
             suffix = "" if result.exit_code is None else f" (exit {result.exit_code})"
-            lines.append(f"  [{mark}] {result.check.name}: {result.check.command}{suffix}")
+            policy = "" if result.execution_status == "unknown" else f" [{result.execution_status}]"
+            lines.append(f"  [{mark}] {result.check.name}: {result.check.command}{suffix}{policy}")
+            if result.success is None and result.output_tail:
+                lines.append(f"        note: {result.output_tail.splitlines()[-1]}")
         lines.append("")
         lines.append("ACCEPTANCE CRITERIA")
         if not self.criteria:

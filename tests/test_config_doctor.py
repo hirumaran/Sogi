@@ -1,8 +1,10 @@
 """Tests for .sogi.toml configuration and the doctor command."""
 
+import json
 from pathlib import Path
 
 import pytest
+from fakes import exit_command
 
 from sogi.cli import main
 from sogi.config import SogiConfig
@@ -51,7 +53,8 @@ def test_config_applies_to_run_budget(tmp_path: Path) -> None:
 
 
 def test_config_verification_commands_are_executed(tmp_path: Path) -> None:
-    (tmp_path / ".sogi.toml").write_text('[verification]\ncommands = ["exit 0"]\n')
+    command = exit_command(0)
+    (tmp_path / ".sogi.toml").write_text(f"[verification]\ncommands = [{json.dumps(command)}]\n")
 
     service = RunService(tmp_path)
     run_id = service.start("Fix auth", compile_context=False).run_id
@@ -60,7 +63,7 @@ def test_config_verification_commands_are_executed(tmp_path: Path) -> None:
 
     assert report.outcome == "PASS"
     executed = [command.command for command in service.get(run_id).telemetry.commands]
-    assert "exit 0" in executed
+    assert command in executed
 
 
 def test_cli_doctor_reports_repo(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from fakes import exit_command
 
 from sogi.cli import main
 from sogi.runs.service import RunService
@@ -31,7 +32,7 @@ def _exercise_run(repo: Path) -> str:
     service.command_started(rid, "mypy")
     service.command_finished(rid, "mypy", exit_code=1, success=False)
     service.raise_warning(rid, "scope_expansion", "billing touched")
-    passing = DiscoveredCheck(name="t", command="exit 0", kind="test")
+    passing = DiscoveredCheck(name="t", command=exit_command(0), kind="test")
     service.verify(rid, checks=(passing,))
     service.complete(rid, allow_unverified=True)
     service.close()

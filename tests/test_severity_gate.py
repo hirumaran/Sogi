@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-from fakes import FakeProvider
+from fakes import FakeProvider, exit_command
 
 from sogi.runs.service import CompletionGateError, RunService
 
@@ -36,7 +36,7 @@ def test_scope_expansion_is_high_severity_and_blocks(repo: Path) -> None:
 
     service.verify(
         run_id,
-        checks=(DiscoveredCheck(name="t", command="exit 0", kind="test"),),
+        checks=(DiscoveredCheck(name="t", command=exit_command(0), kind="test"),),
     )
     with pytest.raises(CompletionGateError) as excinfo:
         service.complete(run_id, allow_unverified=True)
@@ -53,7 +53,7 @@ def test_acknowledgement_unlocks_completion(repo: Path) -> None:
     service.acknowledge(run_id, "scope_expansion", "billing/charge.py")
     service.verify(
         run_id,
-        checks=(DiscoveredCheck(name="t", command="exit 0", kind="test"),),
+        checks=(DiscoveredCheck(name="t", command=exit_command(0), kind="test"),),
     )
 
     record = service.complete(run_id)
@@ -79,6 +79,8 @@ def test_warning_level_findings_do_not_block(service: RunService) -> None:
     warnings = service.get(run_id).telemetry.warnings
     assert any(w.severity == "WARNING" and w.kind == "repeated_read" for w in warnings)
 
-    service.verify(run_id, checks=(DiscoveredCheck(name="t", command="exit 0", kind="test"),))
+    service.verify(
+        run_id, checks=(DiscoveredCheck(name="t", command=exit_command(0), kind="test"),)
+    )
     record = service.complete(run_id, allow_unverified=True)
     assert record.state.phase.value == "done"
