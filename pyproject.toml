@@ -22,10 +22,12 @@ dependencies = []
 [project.optional-dependencies]
 analyzer = ["tree-sitter-analyzer>=1.29,<2"]
 mcp = ["mcp>=1.0,<2"]
+config = ["tomli>=2.0,<3; python_version < '3.11'"]
 dev = [
   "pytest>=8.0,<10",
   "pytest-cov>=5,<8",
   "ruff>=0.5,<1",
+  "tomli>=2.0,<3; python_version < '3.11'",
 ]
 
 [project.scripts]

@@ -10,6 +10,7 @@ from sogi.core.task_spec import TaskSpec
 from sogi.repository.tree_sitter_provider import AnalyzerCommandError, TreeSitterProvider
 from sogi.runs.render import render_events
 from sogi.runs.service import RunNotFoundError, RunService
+from sogi.verification.discovery import discover_checks
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -130,6 +131,11 @@ def build_parser() -> argparse.ArgumentParser:
     patch.add_argument("--base", default="HEAD", help="Base revision for the diff")
     patch.add_argument("--format", choices=("text", "json"), default="text")
 
+    doctor = subcommands.add_parser(
+        "doctor", help="Check Sogi's environment and repository integration health"
+    )
+    doctor.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
+
     mcp = subcommands.add_parser("mcp", help="Run the Sogi MCP server over stdio")
     mcp.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
     mcp.add_argument("--run", help="Attach the server to an existing run")
@@ -157,9 +163,63 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_hook(args)
     if args.command == "patch":
         return _cmd_patch(args)
+    if args.command == "doctor":
+        return _cmd_doctor(args)
     if args.command == "mcp":
         return _cmd_mcp(args)
     return 2
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    import shutil
+    import sys as _sys
+
+    from sogi import __version__
+
+    checks: list[tuple[str, bool, str]] = []
+    checks.append(("python", _sys.version_info >= (3, 10), _sys.version.split()[0]))
+    checks.append(("sogi", True, __version__))
+    checks.append(("git", shutil.which("git") is not None, "PATH"))
+
+    try:
+        import tree_sitter_analyzer  # noqa: F401
+
+        analyzer_status, analyzer_info = True, "installed"
+    except ImportError:
+        analyzer_status, analyzer_info = False, "missing (pip install 'sogi[analyzer]')"
+    checks.append(("tree-sitter-analyzer", analyzer_status, analyzer_info))
+
+    try:
+        import mcp  # noqa: F401
+
+        mcp_status, mcp_info = True, "installed"
+    except ImportError:
+        mcp_status, mcp_info = False, "missing (optional, pip install 'sogi[mcp]')"
+    checks.append(("mcp-sdk", mcp_status, mcp_info))
+
+    repo = args.repo.expanduser().resolve()
+    repo_ok = repo.is_dir()
+    checks.append(("repo", repo_ok, str(repo) if repo_ok else "not found"))
+    if repo_ok:
+        checks.append(("git-repo", (repo / ".git").exists(), "worktree"))
+
+        with RunService(repo) as service:
+            db_ok = service.db.schema_version() >= 1
+            checks.append(("database", db_ok, f"schema v{service.db.schema_version()}"))
+            active = service.active_run_id()
+            checks.append(("active-run", True, active or "none"))
+            discovered = discover_checks(repo)
+            checks.append(("verification-checks", True, f"{len(discovered)} discovered"))
+
+    failed = [name for name, ok, _ in checks if not ok]
+    for name, ok, info in checks:
+        mark = "ok  " if ok else "FAIL"
+        print(f"  [{mark}] {name:<22} {info}")
+    if failed:
+        print(f"\nsogi: problems found: {', '.join(failed)}")
+        return 1
+    print("\nAll environment checks passed.")
+    return 0
 
 
 def _cmd_patch(args: argparse.Namespace) -> int:

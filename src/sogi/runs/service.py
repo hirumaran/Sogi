@@ -37,7 +37,7 @@ from sogi.repository.tree_sitter_provider import AnalyzerCommandError, TreeSitte
 from sogi.repository.worktree import capture_fingerprint
 from sogi.state.engineering_state import EngineeringState
 from sogi.storage.db import SogiDatabase
-from sogi.verification.discovery import DiscoveredCheck
+from sogi.verification.discovery import DiscoveredCheck, discover_checks
 from sogi.verification.verifier import VerificationReport, Verifier
 
 from .render import render_run_start, render_run_state
@@ -79,10 +79,13 @@ class RunService:
         analyzer_command: tuple[str, ...] | None = None,
         provider: RepositoryProvider | None = None,
     ) -> None:
+        from sogi.config import SogiConfig
+
         self.repo_root = repo_root.expanduser().resolve()
         if not self.repo_root.is_dir():
             raise ValueError(f"Repository does not exist: {self.repo_root}")
         self.sogi_dir = self.repo_root / ".sogi"
+        self.config = SogiConfig.load(self.repo_root)
         self.db = SogiDatabase(self.sogi_dir)
         self.events = EventLog(self.db)
         self._provider = provider
@@ -98,11 +101,13 @@ class RunService:
         *,
         acceptance_criteria: tuple[str, ...] = (),
         constraints: tuple[str, ...] = (),
-        budget: int = 4000,
+        budget: int | None = None,
         compile_context: bool = True,
     ) -> RunRecord:
         """Create a run, understand the task, and (best-effort) compile context."""
         run_id = self._new_run_id()
+        if budget is None:
+            budget = self.config.context_budget or 4000
         task = TaskSpec.from_prompt(
             objective,
             acceptance_criteria=tuple(item.strip() for item in acceptance_criteria if item.strip()),
@@ -220,7 +225,8 @@ class RunService:
             outcome = rec.telemetry.outcome
 
             if not force:
-                self._check_gate(rec, allow_unverified)
+                accept_unverified = allow_unverified or not self.config.block_on_unverified
+                self._check_gate(rec, accept_unverified)
                 if rec.telemetry.last_verification_outcome == "PASS":
                     outcome = "completed"
                 else:
@@ -678,7 +684,15 @@ class RunService:
         one ``verification_result`` event per criterion.
         """
         record = self.get(run_id)
-        report = Verifier(self.repo_root, timeout=timeout).verify(record, checks=checks)
+        discovered = checks if checks is not None else discover_checks(self.repo_root)
+        # Explicit .sogi.toml commands run alongside repository-declared ones.
+        configured = tuple(
+            DiscoveredCheck(name=f"config: {command}", command=command, kind="test")
+            for command in self.config.verification_commands
+        )
+        report = Verifier(self.repo_root, timeout=timeout).verify(
+            record, checks=discovered + configured
+        )
         fingerprint = capture_fingerprint(self.repo_root)
 
         def mutate(rec: RunRecord, now: str) -> list[Event]:
