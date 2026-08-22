@@ -122,6 +122,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hook.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
     hook.add_argument("--run", help="Attach the observation to an explicit run")
+    hook.add_argument(
+        "--session", help="Session id binding observations to one agent session"
+    )
+    hook.add_argument("--debug", action="store_true", help="Surface hook errors")
 
     patch = subcommands.add_parser(
         "patch", help="Assess the working-tree diff for a run (tampering, scope, risk)"
@@ -254,22 +258,24 @@ def _cmd_hook(args: argparse.Namespace) -> int:
     every failure mode exits 0 silently; only --debug surfaces problems."""
     from sogi.integrations import hooks as hook_ingest
 
+    repo = args.repo.expanduser().resolve()
     payload = hook_ingest.read_payload()
     if payload is None:
         return 0
-    observations = hook_ingest.map_hook_payload(payload)
-    if not observations:
-        return 0
     try:
-        with RunService(args.repo) as service:  # analyzer loads lazily; not needed here
-            run_id = args.run or service.active_run_id()
-            if run_id:
-                hook_ingest.apply_to_service(service, observations, run_id)
+        if args.run:
+            run_id = args.run
+        else:
+            with RunService(repo) as service:
+                run_id = service.active_run_id() or ""
+        if run_id:
+            hook_ingest.process_payload(repo, payload, run_id, args.session)
+        hook_ingest.note_health(repo, received=1)
     except Exception:
+        hook_ingest.note_health(repo, dropped=1, parse_failed=1)
         if getattr(args, "debug", False):
             raise
         # A supervision failure must never break the supervised agent.
-        pass
     return 0
 
 

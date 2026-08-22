@@ -111,15 +111,19 @@ class SogiMcp:
         rid = self._resolve_run(run_id)
         record = self.service.get(rid)
         warnings = [
-            {"kind": warning.kind, "message": warning.message}
+            {"kind": warning.kind, "severity": warning.severity, "message": warning.message}
             for warning in record.telemetry.warnings
         ]
+        from sogi.integrations.hooks import read_health
+
+        health = read_health(self.service.repo_root)
         return {
             "run_id": rid,
             "phase": record.state.phase.value,
             "files_modified": list(record.telemetry.files_modified),
             "warnings": warnings,
             "clean": not warnings,
+            "observation_health": health,
         }
 
     def verify(self, run_id: str | None = None) -> dict[str, Any]:

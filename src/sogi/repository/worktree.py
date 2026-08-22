@@ -31,21 +31,58 @@ class WorktreeFingerprint:
 
 
 def capture_fingerprint(repo_root: Path) -> WorktreeFingerprint:
+    """Capture a content-sensitive fingerprint of the working tree.
+
+    The hash covers the actual diff *contents* — not just the set of changed
+    filenames — so re-editing an already-dirty file (same filenames, new bytes)
+    produces a different fingerprint and the completion gate rejects the now-
+    stale evidence. Streamed incrementally so large repositories stay cheap.
+
+    Covers, in order: current HEAD, staged diff, unstaged diff, and each
+    untracked file's path plus a streaming content hash. Non-Git repos degrade
+    honestly to ``None`` (staleness then relies on the event-sequence watermark).
+    """
     root = repo_root.expanduser().resolve()
     head = _git(root, "rev-parse", "HEAD")
-    status = _git(root, "status", "--porcelain")
-    changed = "\n".join(
-        filter(
-            None,
-            [
-                status,
-                _git(root, "diff", "--name-only"),
-                _git(root, "diff", "--cached", "--name-only"),
-            ],
-        )
-    )
-    diff_hash = hashlib.sha256(changed.encode("utf-8")).hexdigest()[:16] if head else None
-    return WorktreeFingerprint(git_head=head, diff_hash=diff_hash)
+    if not head:
+        return WorktreeFingerprint(git_head=None, diff_hash=None)
+    hasher = hashlib.sha256()
+    _feed(hasher, b"head", head.encode("utf-8"))
+    # Tracked changes: full unified-0 diff content for staged + unstaged.
+    _feed(hasher, b"staged", (_git(root, "diff", "--cached", "--unified=0") or "").encode("utf-8"))
+    _feed(hasher, b"unstaged", (_git(root, "diff", "--unified=0") or "").encode("utf-8"))
+    # Untracked files: path plus a streaming per-file content hash (git diff
+    # never includes untracked files, so they must be folded in explicitly).
+    untracked = _git(root, "ls-files", "--others", "--exclude-standard") or ""
+    for raw in untracked.splitlines():
+        path = raw.strip()
+        if not path:
+            continue
+        _feed(hasher, b"untracked", path.encode("utf-8"))
+        _fold_file(hasher, root / path)
+    return WorktreeFingerprint(git_head=head, diff_hash=hasher.hexdigest()[:16])
+
+
+def _feed(hasher: hashlib._Hash, tag: bytes, value: bytes) -> None:
+    """Length-prefixed feed so adjacent chunks cannot collide (``ab|cd`` vs ``a|bcd``)."""
+    hasher.update(tag)
+    hasher.update(len(value).to_bytes(8, "big"))
+    hasher.update(value)
+
+
+def _fold_file(hasher: hashlib._Hash, path: Path) -> None:
+    """Fold one file's content into the fingerprint via a streaming sub-hash."""
+    sub = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                sub.update(chunk)
+    except (OSError, ValueError):
+        # Binary/unreadable/missing: the path is already folded above, so the
+        # fingerprint still moves with this entry even if content is unavailable.
+        hasher.update(b"<unreadable>")
+        return
+    hasher.update(sub.digest())
 
 
 def _git(root: Path, *args: str) -> str | None:
