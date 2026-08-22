@@ -14,8 +14,10 @@ from pathlib import Path
 
 from sogi.core.run_record import RunRecord
 
+from . import evidence_providers
 from .discovery import DiscoveredCheck, discover_checks
 from .evidence import CriterionResult, map_criteria
+from .evidence_providers import ExecutedTest
 
 #: Truncate captured output so reports stay readable and storage stays small.
 _OUTPUT_TAIL_CHARS = 2000
@@ -32,6 +34,8 @@ class CheckResult:
     success: bool | None  # None = skipped / not executed
     exit_code: int | None = None
     output_tail: str = ""
+    #: Structured evidence when the check produced a parseable test report.
+    executed_tests: tuple[ExecutedTest, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -41,6 +45,9 @@ class CheckResult:
             "success": self.success,
             "exit_code": self.exit_code,
             "output_tail": self.output_tail,
+            "executed_tests": [
+                {"nodeid": item.nodeid, "outcome": item.outcome} for item in self.executed_tests
+            ],
         }
 
 
@@ -150,9 +157,16 @@ class Verifier:
         )
 
     def _run(self, check: DiscoveredCheck) -> CheckResult:
+        # Structured evidence: pytest-like commands get a JUnit XML report so
+        # executed test identities (not just a suite exit code) are captured.
+        report_path: Path | None = None
+        command = check.command
+        if check.kind == "test" and evidence_providers.pytest_command_wants_report(command):
+            report_path = evidence_providers.make_temp_report()
+            command = evidence_providers.instrument_pytest_command(command, report_path)
         try:
             completed = subprocess.run(  # noqa: S602 - repo-declared command
-                check.command,
+                command,
                 shell=True,
                 cwd=self.repo_root,
                 capture_output=True,
@@ -166,19 +180,35 @@ class Verifier:
         except OSError as exc:
             return CheckResult(check=check, success=False, output_tail=str(exc))
         output = (completed.stdout or "") + (completed.stderr or "")
-        if completed.returncode in _TOOL_NOT_FOUND_CODES:
+        executed_tests: tuple[ExecutedTest, ...] = ()
+        if report_path is not None:
+            try:
+                executed_tests = evidence_providers.parse_junit_xml(report_path)
+            finally:
+                report_path.unlink(missing_ok=True)
+        result = self._classify(check, completed.returncode, output)
+        return CheckResult(
+            check=check,
+            success=result.success,
+            exit_code=result.exit_code,
+            output_tail=result.output_tail,
+            executed_tests=executed_tests,
+        )
+
+    def _classify(self, check: DiscoveredCheck, returncode: int, output: str) -> CheckResult:
+        if returncode in _TOOL_NOT_FOUND_CODES:
             # The tool itself is not installed: that is an environment fact,
             # not evidence that the code fails its requirements.
-            tail = output[-_OUTPUT_TAIL_CHARS:] if output else f"exit {completed.returncode}"
+            tail = output[-_OUTPUT_TAIL_CHARS:] if output else f"exit {returncode}"
             return CheckResult(
                 check=check,
                 success=None,
-                exit_code=completed.returncode,
+                exit_code=returncode,
                 output_tail=tail[:200],
             )
         return CheckResult(
             check=check,
-            success=completed.returncode == 0,
-            exit_code=completed.returncode,
+            success=returncode == 0,
+            exit_code=returncode,
             output_tail=output[-_OUTPUT_TAIL_CHARS:],
         )

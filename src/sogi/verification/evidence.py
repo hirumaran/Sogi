@@ -108,17 +108,58 @@ def map_criteria(
     record: RunRecord,
     results: tuple[CheckResult, ...],
 ) -> tuple[CriterionResult, ...]:
-    """Map every acceptance criterion to SATISFIED / VIOLATED / UNVERIFIED."""
+    """Map every acceptance criterion to SATISFIED / VIOLATED / UNVERIFIED.
+
+    Node-level evidence takes precedence: when structured reports captured
+    executed test identities, a criterion is SATISFIED only if a matching
+    test actually executed and passed — a passing suite whose relevant tests
+    were never collected proves nothing.
+    """
+    executed_tests = tuple(item for result in results for item in result.executed_tests)
     test_results = [result for result in results if result.check.kind == "test"]
-    executed = [result for result in test_results if result.success is not None]
-    tests_executed = bool(executed)
-    tests_passed = tests_executed and all(result.success for result in executed)
+    executed_results = [result for result in test_results if result.success is not None]
+    tests_executed = bool(executed_results)
+    tests_passed = tests_executed and all(result.success for result in executed_results)
 
     mapped: list[CriterionResult] = []
     for criterion in record.task.acceptance_criteria:
         terms = criterion_terms(criterion)
-        evidence = matching_evidence(record, terms)
-        if not evidence:
+        evidence_paths = matching_evidence(record, terms)
+        node_evidence = _matching_nodes(executed_tests, terms)
+
+        if node_evidence:
+            skipped_nodes = [item for item in node_evidence if item.outcome == "skipped"]
+            failed_nodes = [item for item in node_evidence if item.outcome in ("failed", "error")]
+            if failed_nodes:
+                mapped.append(
+                    CriterionResult(
+                        criterion=criterion,
+                        status=VIOLATED,
+                        evidence=tuple(item.nodeid for item in node_evidence),
+                        note="Matching executed test(s) failed.",
+                    )
+                )
+            elif skipped_nodes and len(skipped_nodes) == len(node_evidence):
+                mapped.append(
+                    CriterionResult(
+                        criterion=criterion,
+                        status=UNVERIFIED,
+                        evidence=tuple(item.nodeid for item in node_evidence),
+                        note="Matching test(s) exist but were skipped.",
+                    )
+                )
+            else:
+                mapped.append(
+                    CriterionResult(
+                        criterion=criterion,
+                        status=SATISFIED,
+                        evidence=tuple(item.nodeid for item in node_evidence),
+                    )
+                )
+            continue
+
+        # No structured identities: fall back to file-level mapping.
+        if not evidence_paths:
             mapped.append(
                 CriterionResult(
                     criterion=criterion,
@@ -126,18 +167,42 @@ def map_criteria(
                     note="No matching test evidence identified.",
                 )
             )
-            continue
-        if not tests_executed:
+        elif not tests_executed:
             mapped.append(
                 CriterionResult(
                     criterion=criterion,
                     status=UNVERIFIED,
-                    evidence=evidence,
+                    evidence=evidence_paths,
                     note="Relevant test exists but was not executed.",
                 )
             )
         elif tests_passed:
-            mapped.append(CriterionResult(criterion=criterion, status=SATISFIED, evidence=evidence))
+            mapped.append(
+                CriterionResult(
+                    criterion=criterion,
+                    status=SATISFIED,
+                    evidence=evidence_paths,
+                    note="File-level evidence only (no structured test report).",
+                )
+            )
         else:
-            mapped.append(CriterionResult(criterion=criterion, status=VIOLATED, evidence=evidence))
+            mapped.append(
+                CriterionResult(
+                    criterion=criterion,
+                    status=VIOLATED,
+                    evidence=evidence_paths,
+                )
+            )
     return tuple(mapped)
+
+
+def _matching_nodes(
+    executed_tests: tuple, terms: tuple[str, ...]
+) -> tuple:
+    """Executed tests whose node ids overlap a criterion's terms."""
+    if not terms:
+        return ()
+    matched = tuple(
+        item for item in executed_tests if any(term in item.nodeid.lower() for term in terms)
+    )
+    return matched
