@@ -196,9 +196,7 @@ def map_criteria(
     return tuple(mapped)
 
 
-def _matching_nodes(
-    executed_tests: tuple, terms: tuple[str, ...]
-) -> tuple:
+def _matching_nodes(executed_tests: tuple, terms: tuple[str, ...]) -> tuple:
     """Executed tests whose node ids overlap a criterion's terms."""
     if not terms:
         return ()
