@@ -71,7 +71,9 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _patch_warning_specs(assessment: PatchAssessment) -> list[tuple[str, str, str, str]]:
+def _patch_warning_specs(
+    assessment: PatchAssessment, *, include_scope: bool = True
+) -> list[tuple[str, str, str, str]]:
     """Deterministic ``(kind, subject, message, severity)`` findings for a patch.
 
     A single source of truth shared by ``verify()`` (automatic) and
@@ -109,6 +111,8 @@ def _patch_warning_specs(assessment: PatchAssessment) -> list[tuple[str, str, st
             )
         )
     for path in assessment.unexpected_files:
+        if not include_scope:
+            continue
         if TEST_FILE_LIKE.match(path):
             continue  # test files get tampering checks, not scope noise
         specs.append(
@@ -152,7 +156,12 @@ def _apply_patch_warnings(
                 type="warning_raised",
                 run_id=rec.run_id,
                 timestamp=now,
-                payload={"kind": kind, "message": message, "severity": severity},
+                payload={
+                    "kind": kind,
+                    "message": message,
+                    "severity": severity,
+                    "subject": subject,
+                },
             )
         )
     return events
@@ -396,15 +405,19 @@ class RunService:
         running ``sogi patch`` and ``sogi verify`` in either order is idempotent.
         """
         record = self.get(run_id)
+        has_scope = record.context is not None
         expected: tuple[str, ...] = ()
-        if record.context is not None:
+        if has_scope:
             expected = tuple(record.context.related_files)
             expected += tuple(record.context.related_tests)
         try:
             assessment = analyze_patch(self.repo_root, base=base, expected_files=expected)
         except (RuntimeError, OSError):
             assessment = PatchAssessment()
-        specs = _patch_warning_specs(assessment)
+        # Scope findings need a defensible scope: without compiled context,
+        # tampering and dependency checks still run, but nothing is called
+        # "unexpected" — flagging every change would be fabrication.
+        specs = _patch_warning_specs(assessment, include_scope=has_scope)
 
         def mutate(rec: RunRecord, now: str) -> list[Event]:
             rec.telemetry.patch_assessment = assessment.to_dict()
@@ -681,7 +694,12 @@ class RunService:
                     type="warning_raised",
                     run_id=run_id,
                     timestamp=now,
-                    payload={"kind": kind, "message": message, "severity": severity},
+                    payload={
+                        "kind": kind,
+                        "message": message,
+                        "severity": severity,
+                        "subject": subject,
+                    },
                 )
             ]
 
@@ -1058,6 +1076,7 @@ class RunService:
                         "kind": finding.kind,
                         "message": finding.message,
                         "severity": finding.severity,
+                        "subject": finding.subject,
                     },
                 )
             )

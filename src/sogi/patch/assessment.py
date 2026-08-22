@@ -20,6 +20,9 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sogi.config import CONFIG_FILE
+from sogi.repository.worktree import filter_transient
+
 TEST_FILE = re.compile(r"(^|/)tests?/|(^|/)test_[^/]*\.py$|[^/]*_test\.py$")
 MANIFESTS = ("pyproject.toml", "package.json", "requirements.txt", "Cargo.toml", "Pipfile")
 SECURITY_PATHS = ("auth", "token", "secret", "credential", "permission", "crypto")
@@ -74,9 +77,8 @@ def analyze_patch(
 
     changed = _git(root, "diff", "--name-only", base).splitlines()
     untracked = _git(root, "ls-files", "--others", "--exclude-standard").splitlines()
-    assessment.changed_files = sorted(
-        {line.strip() for line in changed + untracked if line.strip()}
-    )
+    # Sogi's own state and generated caches are never engineering changes.
+    assessment.changed_files = sorted(set(filter_transient(changed + untracked)) - {CONFIG_FILE})
     if not assessment.changed_files:
         return assessment
 
