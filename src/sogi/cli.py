@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from sogi.context.compiler import ContextCompiler
 from sogi.core.task_spec import TaskSpec
@@ -150,6 +151,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
 
+    eval_cmd = subcommands.add_parser("eval", help="Controlled Sogi-on vs Sogi-off evaluation")
+    eval_sub = eval_cmd.add_subparsers(dest="eval_command", required=True)
+
+    eval_run = eval_sub.add_parser("run", help="Run a task suite under one arm")
+    eval_run.add_argument("suite", type=Path, help="Suite JSON file ({tasks: [...]})")
+    eval_run.add_argument("--arm", choices=("baseline", "sogi"), default="baseline", required=True)
+    eval_run.add_argument(
+        "--runner",
+        help="Agent command template with {prompt} and {repo} placeholders",
+    )
+    eval_run.add_argument("--agent", default="agent", help="Agent label for results")
+    eval_run.add_argument("--repeats", type=int, default=1)
+    eval_run.add_argument("--mock", action="store_true", help="Dry-run without an agent")
+    eval_run.add_argument("--out", type=Path, required=True, help="JSONL output path")
+    eval_run.add_argument("--sogi-repo", type=Path, help="Repo whose runs grade the sogi arm")
+
+    eval_compare = eval_sub.add_parser("compare", help="Compare two JSONL result files")
+    eval_compare.add_argument("baseline", type=Path)
+    eval_compare.add_argument("sogi", type=Path)
+    eval_compare.add_argument("--format", choices=("text", "json"), default="text")
+
     mcp = subcommands.add_parser("mcp", help="Run the Sogi MCP server over stdio")
     mcp.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
     mcp.add_argument("--run", help="Attach the server to an existing run")
@@ -179,9 +201,54 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_patch(args)
     if args.command == "doctor":
         return _cmd_doctor(args)
+    if args.command == "eval":
+        return _cmd_eval(args)
     if args.command == "mcp":
         return _cmd_mcp(args)
     return 2
+
+
+def _cmd_eval(args: argparse.Namespace) -> int:
+    from sogi.eval.compare import compare as compare_report
+    from sogi.eval.compare import render
+    from sogi.eval.harness import ExperimentArm, MockRunner, ShellAgentRunner, run_suite
+    from sogi.eval.task import load_suite
+
+    if args.eval_command == "run":
+        try:
+            tasks = load_suite(args.suite)
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"sogi: {exc}", file=sys.stderr)
+            return 1
+        runner: Any
+        if args.mock:
+            runner = MockRunner()
+        elif args.runner:
+            runner = ShellAgentRunner(args.runner)
+        else:
+            print("sogi: eval run needs --runner or --mock", file=sys.stderr)
+            return 1
+        results = run_suite(
+            tasks,
+            arm=ExperimentArm(args.arm),
+            runner=runner,
+            agent_label=args.agent,
+            sogi_repo=args.sogi_repo,
+            repeats=max(1, args.repeats),
+        )
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.out, "a", encoding="utf-8") as handle:
+            for result in results:
+                handle.write(result.to_json() + "\n")
+        print(f"Wrote {len(results)} trial(s) to {args.out}")
+        return 0
+
+    report = compare_report(args.baseline, args.sogi)
+    if args.format == "json":
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(render(report))
+    return 0
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
