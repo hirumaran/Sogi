@@ -846,8 +846,9 @@ class RunService:
         if record.context is not None:
             expected = tuple(record.context.related_files)
             expected += tuple(record.context.related_tests)
+        has_scope = record.context is not None
         assessment = _analyze_patch_safe(self.repo_root, expected)
-        patch_specs = _patch_warning_specs(assessment)
+        patch_specs = _patch_warning_specs(assessment, include_scope=has_scope)
 
         def mutate(rec: RunRecord, now: str) -> list[Event]:
             rec.telemetry.last_verification_outcome = report.outcome
