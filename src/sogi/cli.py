@@ -86,6 +86,20 @@ def build_parser() -> argparse.ArgumentParser:
     ack.add_argument("subject", help="Finding subject, e.g. the unrelated file path")
     ack.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
 
+    rebuild = run_sub.add_parser(
+        "rebuild", help="Reconstruct a run purely from its event stream"
+    )
+    rebuild.add_argument("run_id")
+    rebuild.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
+    rebuild.add_argument("--format", choices=("text", "json"), default="text")
+
+    integrity = run_sub.add_parser(
+        "check-integrity", help="Compare the event-stream projection with the stored snapshot"
+    )
+    integrity.add_argument("run_id")
+    integrity.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
+    integrity.add_argument("--format", choices=("text", "json"), default="text")
+
     verify = subcommands.add_parser("verify", help="Independently verify a run's work")
     verify.add_argument("run_id")
     verify.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
@@ -324,7 +338,54 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return _cmd_run_complete(args)
     if args.run_command == "acknowledge":
         return _cmd_run_acknowledge(args)
+    if args.run_command == "rebuild":
+        return _cmd_run_rebuild(args)
+    if args.run_command == "check-integrity":
+        return _cmd_run_integrity(args)
     return 2
+
+
+def _cmd_run_rebuild(args: argparse.Namespace) -> int:
+    from sogi.events.replay import replay
+
+    try:
+        with RunService(args.repo) as service:
+            events = service.events.for_run(args.run_id)
+            record = replay(events)
+    except (RunNotFoundError, ValueError) as exc:
+        print(f"sogi: {exc}", file=sys.stderr)
+        return 1
+    if args.format == "json":
+        print(json.dumps(record.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"Rebuilt run {record.run_id} from {len(events)} events.")
+        print(f"Phase: {record.state.phase.value.upper()}")
+    return 0
+
+
+def _cmd_run_integrity(args: argparse.Namespace) -> int:
+    from sogi.events.replay import compare_with_snapshot, replay
+
+    try:
+        with RunService(args.repo) as service:
+            events = service.events.for_run(args.run_id)
+            stored = service.get(args.run_id)
+            result = compare_with_snapshot(replay(events), stored)
+    except (RunNotFoundError, ValueError) as exc:
+        print(f"sogi: {exc}", file=sys.stderr)
+        return 1
+    if args.format == "json":
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        if result["mismatches"]:
+            print("INTEGRITY: MISMATCH")
+            for item in result["mismatches"]:
+                print(f"  - {item}")
+            return 1
+        print("INTEGRITY: OK (projection matches event stream)")
+        for item in result["snapshot_only"]:
+            print(f"  snapshot-only: {item}")
+    return 0
 
 
 def _cmd_run_acknowledge(args: argparse.Namespace) -> int:

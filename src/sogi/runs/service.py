@@ -732,6 +732,29 @@ class RunService:
                         success=result.success,
                     )
                 )
+                # The stream must carry what the projection carries, so
+                # replay can reproduce executed verification commands.
+                events.append(
+                    Event(
+                        type="command_started",
+                        run_id=run_id,
+                        timestamp=now,
+                        payload={"command": result.check.command},
+                    )
+                )
+                events.append(
+                    Event(
+                        type="command_finished",
+                        run_id=run_id,
+                        timestamp=now,
+                        payload={
+                            "command": result.check.command,
+                            "exit_code": result.exit_code,
+                            "success": result.success,
+                            "result": result.output_tail,
+                        },
+                    )
+                )
             for item in report.criteria:
                 rec.telemetry.verification.append(
                     VerificationRecord(
