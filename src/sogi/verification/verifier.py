@@ -8,7 +8,6 @@ weight here — only executed commands and their exit codes do.
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,13 +17,10 @@ from . import evidence_providers
 from .discovery import DiscoveredCheck, discover_checks
 from .evidence import CriterionResult, map_criteria
 from .evidence_providers import ExecutedTest
+from .execution import ExecutionPolicy
 
 #: Truncate captured output so reports stay readable and storage stays small.
 _OUTPUT_TAIL_CHARS = 2000
-
-#: Shell-level codes meaning the command could not be launched at all.
-_TOOL_NOT_FOUND_CODES = frozenset({126, 127})
-
 
 @dataclass(frozen=True)
 class CheckResult:
@@ -34,6 +30,7 @@ class CheckResult:
     success: bool | None  # None = skipped / not executed
     exit_code: int | None = None
     output_tail: str = ""
+    execution_status: str = "unknown"
     #: Structured evidence when the check produced a parseable test report.
     executed_tests: tuple[ExecutedTest, ...] = ()
 
@@ -45,6 +42,7 @@ class CheckResult:
             "success": self.success,
             "exit_code": self.exit_code,
             "output_tail": self.output_tail,
+            "execution_status": self.execution_status,
             "executed_tests": [
                 {"nodeid": item.nodeid, "outcome": item.outcome} for item in self.executed_tests
             ],
@@ -112,9 +110,16 @@ def _mark(success: bool | None) -> str:
 class Verifier:
     """Executes discovered checks and produces a VerificationReport."""
 
-    def __init__(self, repo_root: Path, *, timeout: float = 600.0) -> None:
+    def __init__(
+        self,
+        repo_root: Path,
+        *,
+        timeout: float = 600.0,
+        execution_policy: ExecutionPolicy | None = None,
+    ) -> None:
         self.repo_root = repo_root.expanduser().resolve()
         self.timeout = timeout
+        self.execution_policy = execution_policy or ExecutionPolicy()
 
     def verify(
         self,
@@ -164,51 +169,18 @@ class Verifier:
         if check.kind == "test" and evidence_providers.pytest_command_wants_report(command):
             report_path = evidence_providers.make_temp_report()
             command = evidence_providers.instrument_pytest_command(command, report_path)
-        try:
-            completed = subprocess.run(  # noqa: S602 - repo-declared command
-                command,
-                shell=True,
-                cwd=self.repo_root,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-            )
-        except subprocess.TimeoutExpired:
-            return CheckResult(
-                check=check, success=False, output_tail=f"timed out after {self.timeout}s"
-            )
-        except OSError as exc:
-            return CheckResult(check=check, success=False, output_tail=str(exc))
-        output = (completed.stdout or "") + (completed.stderr or "")
+        execution = self.execution_policy.run(command, cwd=self.repo_root, timeout=self.timeout)
         executed_tests: tuple[ExecutedTest, ...] = ()
         if report_path is not None:
             try:
                 executed_tests = evidence_providers.parse_junit_xml(report_path)
             finally:
                 report_path.unlink(missing_ok=True)
-        result = self._classify(check, completed.returncode, output)
         return CheckResult(
             check=check,
-            success=result.success,
-            exit_code=result.exit_code,
-            output_tail=result.output_tail,
+            success=execution.success,
+            exit_code=execution.exit_code,
+            output_tail=execution.output_tail[-_OUTPUT_TAIL_CHARS:],
+            execution_status=execution.status,
             executed_tests=executed_tests,
-        )
-
-    def _classify(self, check: DiscoveredCheck, returncode: int, output: str) -> CheckResult:
-        if returncode in _TOOL_NOT_FOUND_CODES:
-            # The tool itself is not installed: that is an environment fact,
-            # not evidence that the code fails its requirements.
-            tail = output[-_OUTPUT_TAIL_CHARS:] if output else f"exit {returncode}"
-            return CheckResult(
-                check=check,
-                success=None,
-                exit_code=returncode,
-                output_tail=tail[:200],
-            )
-        return CheckResult(
-            check=check,
-            success=returncode == 0,
-            exit_code=returncode,
-            output_tail=output[-_OUTPUT_TAIL_CHARS:],
         )
