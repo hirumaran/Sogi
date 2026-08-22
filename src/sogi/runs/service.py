@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import re
 import secrets
 import threading
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ from sogi.context.compiler import CompiledContext, ContextCompiler
 from sogi.core.phases import EngineeringPhase
 from sogi.core.run_record import (
     CommandRecord,
+    PatchRecord,
     RunRecord,
     Telemetry,
     VerificationRecord,
@@ -34,6 +37,13 @@ from sogi.events.event import Event
 from sogi.events.log import EventLog
 from sogi.governor import Governor
 from sogi.patch import PatchAssessment, analyze_patch
+from sogi.patch.ast_grep import AstGrepPatchProvider
+from sogi.patch.provider import (
+    PatchError,
+    PatchProvider,
+    RegionPatchProvider,
+    StaleTargetError,
+)
 from sogi.repository.provider import RepositoryProvider
 from sogi.repository.tree_sitter_provider import AnalyzerCommandError, TreeSitterProvider
 from sogi.repository.worktree import capture_fingerprint
@@ -65,6 +75,18 @@ PROVENANCE_KEYS = (
     "observation_source",
 )
 
+#: Operations the patch engine accepts from agents.
+PATCH_OPERATIONS = frozenset({"replace_symbol", "rewrite"})
+
+
+def _patch_id(diff: str, existing: list[PatchRecord]) -> str:
+    """Stable short id derived from the diff content, unique per run."""
+    taken = {patch.patch_id for patch in existing}
+    candidate = hashlib.sha256(diff.encode("utf-8")).hexdigest()[:8]
+    while candidate in taken:
+        candidate = hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:8]
+    return candidate
+
 
 def _provenance_fields(provenance: dict[str, Any] | None) -> dict[str, Any]:
     """Filter to known provenance keys; defaults to agent self-reporting."""
@@ -88,6 +110,24 @@ class CompletionGateError(RuntimeError):
         super().__init__(f"{reason} {remediation}")
         self.reason = reason
         self.remediation = remediation
+
+
+class PatchScopeError(PatchError):
+    """Raised when a proposed patch touches files outside the task's scope.
+
+    Like the completion gate, the rejection names its own remediation: narrow
+    the rewrite, or have an operator acknowledge the out-of-scope file via
+    ``sogi acknowledge`` so the decision is auditable rather than silent.
+    """
+
+    def __init__(self, files: tuple[str, ...]) -> None:
+        listed = ", ".join(files)
+        super().__init__(
+            f"PATCH REJECTED: target(s) outside task scope: {listed}. "
+            "Narrow the rewrite to the localized region, or acknowledge with "
+            "`sogi acknowledge scope_expansion <file>`."
+        )
+        self.files = files
 
 
 def _now() -> str:
@@ -464,6 +504,215 @@ class RunService:
 
         self._mutate(run_id, mutate)
         return assessment.to_dict()
+
+    # -- patch engine ----------------------------------------------------------
+
+    def propose_patch(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Compute a governed edit proposal without touching any file.
+
+        The target is resolved and content-hashed now; if the agent inspected
+        a stale version (``expected_hash`` mismatch) the proposal is rejected
+        immediately with the stale-edit error. The full diff is stored on the
+        record so apply can guarantee it applies exactly what was previewed.
+        """
+        operation = str(request.get("operation", "")).strip()
+        if operation not in PATCH_OPERATIONS:
+            raise ValueError(
+                f"Unsupported patch operation: {operation!r} "
+                f"(expected one of {sorted(PATCH_OPERATIONS)})"
+            )
+        engine = self._patch_engine(operation)
+        try:
+            proposal = engine.dry_run(request)
+        except StaleTargetError:
+            raise
+        except PatchError as exc:
+            raise PatchError(f"Patch proposal failed: {exc}") from exc
+        if not proposal.diff.strip():
+            raise PatchError(
+                "Proposal produced no changes; check the pattern/symbol and "
+                "the replacement content."
+            )
+
+        fingerprint = (
+            capture_fingerprint(self.repo_root) if operation == "rewrite" else None
+        )
+        observed_hash = proposal.target.content_hash if proposal.target else None
+        existing = self.get(run_id).telemetry.patches
+        patch_id = _patch_id(proposal.diff, existing)
+
+        def mutate(rec: RunRecord, now: str) -> list[Event]:
+            patch_record = PatchRecord(
+                patch_id=patch_id,
+                operation=operation,
+                files=proposal.files,
+                diff=proposal.diff,
+                status="proposed",
+                target=request.get("symbol") or request.get("pattern"),
+                expected_hash=request.get("expected_hash"),
+                observed_hash=observed_hash,
+                pre_diff_hash=fingerprint.diff_hash if fingerprint else None,
+                reason=str(request.get("reason", "")),
+                request=dict(request),
+                created_at=now,
+            )
+            rec.telemetry.patches.append(patch_record)
+            return [
+                Event(
+                    type="patch_proposed",
+                    run_id=run_id,
+                    timestamp=now,
+                    payload=patch_record.to_dict(),
+                )
+            ]
+
+        self._mutate(run_id, mutate)
+        return self._patch(run_id, self.get(run_id), patch_id).to_dict()
+
+    def apply_patch(self, run_id: str, patch_id: str) -> dict[str, Any]:
+        """Apply a previously proposed patch after re-validating every guard.
+
+        Rejections are deterministic and auditable:
+
+        - the target region must still hash to the proposed value (region ops);
+        - the worktree fingerprint must be unchanged since proposal (rewrites);
+        - touched files must lie inside the task's compiled scope, unless each
+          out-of-scope path was explicitly acknowledged.
+
+        On success the applied files are recorded as ``file_modified``
+        observations, so governor checks see Sogi's own edits too.
+        """
+        with self._file_lock():
+            record = self.get(run_id)
+            now = _now()
+            patch_record = self._patch(run_id, record, patch_id)
+            if patch_record.status != "proposed":
+                raise PatchError(f"Patch {patch_id} is already {patch_record.status}.")
+            engine = self._patch_engine(patch_record.operation)
+
+            # Re-derive the proposal from the stored request; anything that moved
+            # the target since propose produces a different diff here.
+            try:
+                fresh_proposal = engine.dry_run(patch_record.request)
+            except StaleTargetError as exc:
+                raise PatchError(
+                    f"PATCH REJECTED for {patch_id}: target changed since proposal. "
+                    "Re-propose with a fresh hash."
+                ) from exc
+            if patch_record.operation == "rewrite":
+                current = capture_fingerprint(self.repo_root)
+                if (
+                    patch_record.pre_diff_hash
+                    and current.diff_hash
+                    and current.diff_hash != patch_record.pre_diff_hash
+                ):
+                    raise PatchError(
+                        f"PATCH REJECTED for {patch_id}: worktree changed since "
+                        "proposal. Re-propose against the current tree."
+                    )
+            if fresh_proposal.diff != patch_record.diff:
+                raise PatchError(
+                    f"PATCH REJECTED for {patch_id}: the proposed edit no longer "
+                    "matches the repository. Re-propose with a fresh hash."
+                )
+
+            events: list[Event] = []
+            if record.context is not None:
+                out_of_scope = self._scope_violations(record, fresh_proposal.files)
+                if out_of_scope:
+                    unacknowledged = tuple(
+                        path
+                        for path in out_of_scope
+                        if f"scope_expansion:{path}" not in record.state.acknowledged
+                    )
+                    events.extend(
+                        _apply_patch_warnings(
+                            record,
+                            now,
+                            [
+                                (
+                                    "scope_expansion",
+                                    path,
+                                    f"{path} is outside the task scope but targeted by patch "
+                                    f"{patch_id}.",
+                                    "HIGH",
+                                )
+                                for path in unacknowledged
+                            ],
+                        )
+                    )
+                    # Persist the audit trail even when refusing: the rejection
+                    # itself must be visible in the event stream.
+                    events.extend(self._govern(record, events, now))
+                    record.state.updated_at = now
+                    record.updated_at = now
+                    self.db.save_run_with_events(record, events)
+                    if unacknowledged:
+                        raise PatchScopeError(unacknowledged)
+
+            engine.apply(patch_record.request)
+
+            updated = replace(
+                patch_record,
+                status="applied",
+                applied_at=now,
+                observed_hash=(
+                    fresh_proposal.target.content_hash
+                    if fresh_proposal.target
+                    else patch_record.observed_hash
+                ),
+            )
+            record.telemetry.patches.remove(patch_record)
+            record.telemetry.patches.append(updated)
+            provenance = {
+                "observation_source": "sogi_patch_engine",
+                "tool_name": "sogi.patch",
+                "host": "sogi",
+            }
+            for path in fresh_proposal.files:
+                if path not in record.state.files_modified:
+                    record.state.files_modified.append(path)
+                if path not in record.telemetry.files_modified:
+                    record.telemetry.files_modified.append(path)
+                events.append(
+                    Event(
+                        type="file_modified",
+                        run_id=run_id,
+                        timestamp=now,
+                        payload={"path": path, **provenance},
+                    )
+                )
+            events.append(
+                Event(
+                    type="patch_applied",
+                    run_id=run_id,
+                    timestamp=now,
+                    payload=updated.to_dict(),
+                )
+            )
+            events.extend(self._govern(record, events, now))
+            record.state.updated_at = now
+            record.updated_at = now
+            self.db.save_run_with_events(record, events)
+            return updated.to_dict()
+
+    def _patch(self, run_id: str, record: RunRecord, patch_id: str) -> PatchRecord:
+        for candidate in record.telemetry.patches:
+            if candidate.patch_id == patch_id:
+                return candidate
+        raise PatchError(f"Unknown patch id {patch_id!r} for run {run_id}")
+
+    def _scope_violations(self, record: RunRecord, files: tuple[str, ...]) -> tuple[str, ...]:
+        scope = set(record.context.related_files) | set(record.context.related_tests)
+        normalized = {path.replace("\\", "/") for path in scope}
+        return tuple(
+            path for path in files if path.replace("\\", "/") not in normalized
+        )
+
+    def _patch_engine(self, operation: str) -> PatchProvider:
+        if operation == "rewrite":
+            return AstGrepPatchProvider(self.repo_root)
+        return RegionPatchProvider(self.repo_root, self._provider_for())
 
     def acknowledge(self, run_id: str, kind: str, subject: str) -> None:
         """Record an explicit policy decision to accept a governor finding.

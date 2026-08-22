@@ -58,6 +58,70 @@ class WarningRecord:
 
 
 @dataclass(frozen=True)
+class PatchRecord:
+    """One proposed structural edit and its lifecycle.
+
+    A patch is proposed (target resolved, content hashed, diff computed) and
+    later applied only if nothing drifted in between. ``expected_hash`` is the
+    region content hash the agent inspected; ``observed_hash`` is what the
+    target actually hashed at proposal time. A mismatch is a stale-edit
+    rejection. The full unified diff travels with the record so apply is
+    deterministic and replay can reproduce it.
+    """
+
+    patch_id: str
+    operation: str
+    files: tuple[str, ...]
+    diff: str
+    status: str = "proposed"  # proposed / applied
+    target: str | None = None
+    expected_hash: str | None = None
+    observed_hash: str | None = None
+    #: Worktree fingerprint at proposal time; apply rejects a drifted tree.
+    pre_diff_hash: str | None = None
+    reason: str = ""
+    #: Original provider request, replayed verbatim during apply re-validation.
+    request: dict[str, Any] = field(default_factory=dict)
+    created_at: str = field(default_factory=_now)
+    applied_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "patch_id": self.patch_id,
+            "operation": self.operation,
+            "files": list(self.files),
+            "diff": self.diff,
+            "status": self.status,
+            "target": self.target,
+            "expected_hash": self.expected_hash,
+            "observed_hash": self.observed_hash,
+            "pre_diff_hash": self.pre_diff_hash,
+            "reason": self.reason,
+            "request": dict(self.request),
+            "created_at": self.created_at,
+            "applied_at": self.applied_at,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> PatchRecord:
+        return cls(
+            patch_id=str(payload["patch_id"]),
+            operation=str(payload["operation"]),
+            files=tuple(payload.get("files", ())),
+            diff=str(payload.get("diff", "")),
+            status=str(payload.get("status", "proposed")),
+            target=payload.get("target"),
+            expected_hash=payload.get("expected_hash"),
+            observed_hash=payload.get("observed_hash"),
+            pre_diff_hash=payload.get("pre_diff_hash"),
+            reason=str(payload.get("reason", "")),
+            request=dict(payload.get("request", {})),
+            created_at=str(payload.get("created_at", _now())),
+            applied_at=payload.get("applied_at"),
+        )
+
+
+@dataclass(frozen=True)
 class VerificationRecord:
     """Evidence mapped back to one acceptance criterion."""
 
@@ -126,6 +190,8 @@ class Telemetry:
     verification_snapshot: VerificationSnapshot | None = None
     #: Deterministic working-tree assessment captured by assess_patch().
     patch_assessment: dict[str, Any] | None = None
+    #: Proposed and applied structural edits (PatchProvider lifecycle).
+    patches: list[PatchRecord] = field(default_factory=list)
     #: Host/model-reported usage. These are measurements with provenance:
     #: values are only present when a host or model API actually reported
     #: them; Sogi never estimates silently.
@@ -157,6 +223,7 @@ class Telemetry:
                 self.verification_snapshot.to_dict() if self.verification_snapshot else None
             ),
             "patch_assessment": self.patch_assessment,
+            "patches": [patch.to_dict() for patch in self.patches],
             "agent_host": self.agent_host,
             "agent_version": self.agent_version,
             "model": self.model,
@@ -190,6 +257,7 @@ class Telemetry:
                 else None
             ),
             patch_assessment=payload.get("patch_assessment"),
+            patches=[PatchRecord.from_dict(item) for item in payload.get("patches", [])],
             agent_host=payload.get("agent_host"),
             agent_version=payload.get("agent_version"),
             model=payload.get("model"),

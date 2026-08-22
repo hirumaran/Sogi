@@ -147,9 +147,12 @@ def test_stdio_server_registers_all_tools(repo: Path) -> None:
 
     names = asyncio.run(run())
     assert names == [
+        "apply_patch",
         "check_scope",
         "get_context",
         "get_state",
+        "localize",
+        "propose_patch",
         "record_decision",
         "record_event",
         "record_usage",

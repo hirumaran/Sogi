@@ -15,9 +15,12 @@ snapshot-only.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from sogi.core.phases import EngineeringPhase
 from sogi.core.run_record import (
     CommandRecord,
+    PatchRecord,
     RunRecord,
     Telemetry,
     VerificationRecord,
@@ -155,6 +158,24 @@ def reduce_event(record: RunRecord | None, event: Event) -> RunRecord:
         )
         record.state.verification[criterion] = _status_to_bool(status)
 
+    elif kind == "patch_proposed":
+        record.telemetry.patches.append(_patch_record_from_payload(payload, event.timestamp))
+
+    elif kind == "patch_applied":
+        patch_id = str(payload.get("patch_id"))
+        for patch in record.telemetry.patches:
+            if patch.patch_id == patch_id:
+                record.telemetry.patches.remove(patch)
+                record.telemetry.patches.append(
+                    replace(
+                        patch,
+                        status="applied",
+                        applied_at=event.timestamp,
+                        diff=str(payload.get("diff", patch.diff)),
+                    )
+                )
+                break
+
     elif kind == "run_completed":
         record.state.phase = EngineeringPhase.DONE
         record.telemetry.completed_at = event.timestamp
@@ -165,6 +186,23 @@ def reduce_event(record: RunRecord | None, event: Event) -> RunRecord:
     record.state.updated_at = event.timestamp
     record.updated_at = event.timestamp
     return record
+
+
+def _patch_record_from_payload(payload: dict, timestamp: str) -> PatchRecord:
+    return PatchRecord(
+        patch_id=str(payload["patch_id"]),
+        operation=str(payload.get("operation", "")),
+        files=tuple(payload.get("files", ())),
+        diff=str(payload.get("diff", "")),
+        status="proposed",
+        target=payload.get("target"),
+        expected_hash=payload.get("expected_hash"),
+        observed_hash=payload.get("observed_hash"),
+        pre_diff_hash=payload.get("pre_diff_hash"),
+        reason=str(payload.get("reason", "")),
+        request=dict(payload.get("request", {})),
+        created_at=timestamp,
+    )
 
 
 def _apply_command_finish(record: RunRecord, payload: dict, event: Event) -> None:
@@ -259,6 +297,7 @@ def compare_with_snapshot(replayed: RunRecord, stored: RunRecord) -> dict[str, l
         replayed.telemetry.verification,
         stored.telemetry.verification,
     )
+    check("telemetry.patches", replayed.telemetry.patches, stored.telemetry.patches)
 
     snapshot_only: list[str] = []
     if stored.context is not None:

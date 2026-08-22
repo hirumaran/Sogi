@@ -11,7 +11,6 @@ from sogi.core.task_spec import TaskSpec
 from sogi.repository.tree_sitter_provider import AnalyzerCommandError, TreeSitterProvider
 from sogi.runs.render import render_events
 from sogi.runs.service import RunNotFoundError, RunService
-from sogi.verification.discovery import discover_checks
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_argument("--budget", type=int, default=None, help="Context token budget")
     context.add_argument("--criterion", action="append", default=[], help="Acceptance criterion")
     context.add_argument("--constraint", action="append", default=[], help="Task constraint")
-    context.add_argument("--format", choices=("text", "json"), default="text")
+    context.add_argument("--format", choices=("text", "json", "localization"), default="text")
     context.add_argument("--no-index", action="store_true", help="Use an existing analyzer index")
     context.add_argument(
         "--analyzer-command",
@@ -140,11 +139,46 @@ def build_parser() -> argparse.ArgumentParser:
     hook.add_argument("--debug", action="store_true", help="Surface hook errors")
 
     patch = subcommands.add_parser(
-        "patch", help="Assess the working-tree diff for a run (tampering, scope, risk)"
+        "patch",
+        help=(
+            "Governed structural edits: assess the working-tree diff, "
+            "propose an edit (dry-run), or apply a proposed patch"
+        ),
     )
-    patch.add_argument("run_id")
+    patch.add_argument(
+        "action",
+        nargs="?",
+        default=None,
+        help="Patch action: assess (default), propose, or apply",
+    )
+    patch.add_argument("run_id", nargs="?", help="Run id")
     patch.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
-    patch.add_argument("--base", default="HEAD", help="Base revision for the diff")
+    patch.add_argument(
+        "--base", default="HEAD", help="[assess] Base revision for the diff"
+    )
+    patch.add_argument(
+        "--symbol", help="[propose] Symbol to replace (resolved via repository intelligence)"
+    )
+    patch.add_argument(
+        "--file", help="[propose] Optional file hint when symbol names are ambiguous"
+    )
+    patch.add_argument(
+        "--expected-hash",
+        dest="expected_hash",
+        help="[propose] Content hash observed at inspection time (stale-edit guard)",
+    )
+    patch.add_argument(
+        "--replacement-from",
+        dest="replacement_from",
+        help="[propose] File containing the replacement body ('-' for stdin)",
+    )
+    patch.add_argument("--pattern", help="[propose] ast-grep search pattern")
+    patch.add_argument("--rewrite", help="[propose] ast-grep rewrite pattern")
+    patch.add_argument(
+        "--paths", nargs="*", default=[], help="[propose] Restrict a rewrite to these paths"
+    )
+    patch.add_argument("--reason", default="", help="[propose] Why this edit is being made")
+    patch.add_argument("--patch-id", dest="patch_id", help="[apply] Id of the proposed patch")
     patch.add_argument("--format", choices=("text", "json"), default="text")
 
     doctor = subcommands.add_parser(
@@ -264,58 +298,31 @@ def _cmd_eval(args: argparse.Namespace) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
-    import shutil
-    import sys as _sys
+    from sogi.doctor import run_doctor
 
-    from sogi import __version__
-
-    checks: list[tuple[str, bool, str]] = []
-    checks.append(("python", _sys.version_info >= (3, 10), _sys.version.split()[0]))
-    checks.append(("sogi", True, __version__))
-    checks.append(("git", shutil.which("git") is not None, "PATH"))
-
-    try:
-        import tree_sitter_analyzer  # noqa: F401
-
-        analyzer_status, analyzer_info = True, "installed"
-    except ImportError:
-        analyzer_status, analyzer_info = False, "missing (pip install 'sogi[analyzer]')"
-    checks.append(("tree-sitter-analyzer", analyzer_status, analyzer_info))
-
-    try:
-        import mcp  # noqa: F401
-
-        mcp_status, mcp_info = True, "installed"
-    except ImportError:
-        mcp_status, mcp_info = False, "missing (optional, pip install 'sogi[mcp]')"
-    checks.append(("mcp-sdk", mcp_status, mcp_info))
-
-    repo = args.repo.expanduser().resolve()
-    repo_ok = repo.is_dir()
-    checks.append(("repo", repo_ok, str(repo) if repo_ok else "not found"))
-    if repo_ok:
-        checks.append(("git-repo", (repo / ".git").exists(), "worktree"))
-
-        with RunService(repo) as service:
-            db_ok = service.db.schema_version() >= 1
-            checks.append(("database", db_ok, f"schema v{service.db.schema_version()}"))
-            active = service.active_run_id()
-            checks.append(("active-run", True, active or "none"))
-            discovered = discover_checks(repo)
-            checks.append(("verification-checks", True, f"{len(discovered)} discovered"))
-
-    failed = [name for name, ok, _ in checks if not ok]
-    for name, ok, info in checks:
-        mark = "ok  " if ok else "FAIL"
-        print(f"  [{mark}] {name:<22} {info}")
-    if failed:
-        print(f"\nsogi: problems found: {', '.join(failed)}")
-        return 1
-    print("\nAll environment checks passed.")
-    return 0
+    report = run_doctor(args.repo)
+    print(report.render())
+    return 0 if report.ok else 1
 
 
 def _cmd_patch(args: argparse.Namespace) -> int:
+    # Legacy compatibility: `sogi patch <run_id>` (a hex id, never an action
+    # name) still means assess.
+    action = args.action
+    if action is not None and action not in ("assess", "propose", "apply"):
+        action, args.run_id = "assess", action
+    if not args.run_id:
+        print("sogi: patch requires a run_id", file=sys.stderr)
+        return 2
+    args.action = action or "assess"
+    if args.action == "propose":
+        return _cmd_patch_propose(args)
+    if args.action == "apply":
+        return _cmd_patch_apply(args)
+    return _cmd_patch_assess(args)
+
+
+def _cmd_patch_assess(args: argparse.Namespace) -> int:
     try:
         with RunService(args.repo) as service:
             assessment = service.assess_patch(args.run_id, base=args.base)
@@ -339,6 +346,80 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         tampering = [w for w in warnings if w.kind == "test_tampering"]
         for warning in tampering:
             print(f"  [TAMPERING] {warning.message}")
+    return 0
+
+
+def _patch_request(args: argparse.Namespace) -> dict[str, Any]:
+    request: dict[str, Any] = {"operation": "", "reason": args.reason}
+    if args.symbol:
+        request.update(
+            {
+                "operation": "replace_symbol",
+                "symbol": args.symbol,
+                "file": args.file,
+                "expected_hash": args.expected_hash,
+            }
+        )
+        if args.replacement_from is None:
+            raise ValueError("--replacement-from is required for replace_symbol proposals")
+        if args.replacement_from == "-":
+            request["replacement"] = sys.stdin.read()
+        else:
+            request["replacement"] = Path(args.replacement_from).read_text(encoding="utf-8")
+        return request
+    if args.pattern or args.rewrite:
+        if not (args.pattern and args.rewrite):
+            raise ValueError("rewrite proposals need both --pattern and --rewrite")
+        request.update(
+            {
+                "operation": "rewrite",
+                "pattern": args.pattern,
+                "rewrite": args.rewrite,
+                "paths": list(args.paths),
+            }
+        )
+        return request
+    raise ValueError("A proposal needs --symbol (replace_symbol) or --pattern/--rewrite")
+
+
+def _cmd_patch_propose(args: argparse.Namespace) -> int:
+    try:
+        request = _patch_request(args)
+        with RunService(args.repo) as service:
+            record = service.propose_patch(args.run_id, request)
+    except (RunNotFoundError, ValueError, RuntimeError, OSError) as exc:
+        print(f"sogi: {exc}", file=sys.stderr)
+        return 1
+    if args.format == "json":
+        print(json.dumps(record, indent=2, sort_keys=True))
+    else:
+        print(f"PATCH PROPOSED  id={record['patch_id']}  op={record['operation']}")
+        print(f"  Files: {', '.join(record['files']) or '(none)'}")
+        if record["observed_hash"]:
+            print(
+                f"  Target hash: {record['observed_hash']}"
+                + (" (verified)" if record["expected_hash"] else "")
+            )
+        print(record["diff"].rstrip())
+        print("\nApply with: sogi patch apply "
+              f"{args.run_id} --patch-id {record['patch_id']}")
+    return 0
+
+
+def _cmd_patch_apply(args: argparse.Namespace) -> int:
+    if not args.patch_id:
+        print("sogi: apply requires --patch-id", file=sys.stderr)
+        return 2
+    try:
+        with RunService(args.repo) as service:
+            record = service.apply_patch(args.run_id, args.patch_id)
+    except (RunNotFoundError, ValueError, RuntimeError, OSError) as exc:
+        print(f"sogi: {exc}", file=sys.stderr)
+        return 1
+    if args.format == "json":
+        print(json.dumps(record, indent=2, sort_keys=True))
+    else:
+        print(f"PATCH APPLIED  id={record['patch_id']}  files={', '.join(record['files'])}")
     return 0
 
 
@@ -369,12 +450,20 @@ def _cmd_hook(args: argparse.Namespace) -> int:
 
 
 def _cmd_context(args: argparse.Namespace) -> int:
+    from sogi.context.localizer import Localizer
+
     if args.run:
         try:
             with RunService(args.repo, analyzer_command=_analyzer_command(args)) as service:
-                compiled = service.compile_context(
-                    args.run, budget=args.budget, prepare=not args.no_index
-                )
+                if args.format == "localization":
+                    record = service.get(args.run)
+                    localization = Localizer(service._provider_for()).localize(
+                        record.task, prepare=not args.no_index
+                    )
+                else:
+                    compiled = service.compile_context(
+                        args.run, budget=args.budget, prepare=not args.no_index
+                    )
         except (RunNotFoundError, AnalyzerCommandError, OSError, ValueError) as exc:
             print(f"sogi: {exc}", file=sys.stderr)
             return 1
@@ -389,13 +478,18 @@ def _cmd_context(args: argparse.Namespace) -> int:
                 constraints=tuple(args.constraint),
             )
             provider = TreeSitterProvider(args.repo, command=_analyzer_command(args))
-            compiled = ContextCompiler(provider, token_budget=args.budget or 4000).compile(
-                task, prepare=not args.no_index
-            )
+            if args.format == "localization":
+                localization = Localizer(provider).localize(task, prepare=not args.no_index)
+            else:
+                compiled = ContextCompiler(provider, token_budget=args.budget or 4000).compile(
+                    task, prepare=not args.no_index
+                )
         except (AnalyzerCommandError, OSError, ValueError) as exc:
             print(f"sogi: {exc}", file=sys.stderr)
             return 1
-    if args.format == "json":
+    if args.format == "localization":
+        print(localization.render())
+    elif args.format == "json":
         print(json.dumps(compiled.to_dict(), indent=2, sort_keys=True))
     else:
         print(compiled.render())

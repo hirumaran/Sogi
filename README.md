@@ -43,15 +43,26 @@ Sogi now covers a trustworthy, closed control-plane loop:
   fingerprint) rejects stale `verify → edit → complete` sequences at the gate;
 - **usage metrics** capture host-reported tokens/cost with explicit provenance, plus
   exploration, interventions, verification outcomes, and duration (`sogi metrics`);
-- an MCP server exposes eight tools (`understand_task`, `get_context`, `get_state`,
-  `record_decision`, `record_event`, `check_scope`, `verify`, `record_usage`);
+- an MCP server exposes the control plane (`understand_task`, `get_context`, `localize`,
+  `get_state`, `record_decision`, `record_event`, `check_scope`,
+  `propose_patch`/`apply_patch`, `verify`, `record_usage`);
+- a **governed patch engine** turns semantic intent into mechanical edits:
+  `sogi patch propose` resolves a symbol or an ast-grep pattern into a dry-run
+  diff, content-hashes the target (a changed hash is a *PATCH REJECTED —
+  re-localize* stale-edit error), scope-checks touched files, and only
+  `sogi patch apply` writes anything, emitting auditable `patch_proposed` /
+  `patch_applied` events;
+- **hierarchical localization** narrows repository → files → symbols → exact line
+  regions in tiers (HIGH / MEDIUM / RISK DEPENDENCY) so agents edit one function,
+  not one directory;
 - a controlled-evaluation harness (`sogi eval run` / `sogi eval compare`) supports
   baseline-vs-Sogi arms over repeatable task suites with raw JSONL results;
-- `sogi doctor` diagnoses environment health; `.sogi.toml` keeps policy in-repo.
+- `sogi doctor` verifies every external dependency (versions, executability,
+  pinned-revision drift) so failures are attributable to a layer.
 
 ## Quick start
 
-The sibling `tree-sitter-analyzer/` checkout is used automatically during local
+The `external/tree-sitter-analyzer/` checkout is used automatically during local
 development when its `.venv` exists. For a clean installation, install Sogi with
 its analyzer and MCP extras:
 
@@ -235,3 +246,5 @@ The next milestone is a controlled evaluation: the same model and agent, with
 and without Sogi, on identical repository tasks — measuring success, token use,
 interventions, and regressions before claiming any improvement.
 See [docs/roadmap.md](docs/roadmap.md).
+The isolated upstream research checkouts and their integration order are documented in
+[docs/external-repositories.md](docs/external-repositories.md).

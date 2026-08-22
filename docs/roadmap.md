@@ -18,8 +18,9 @@
 
 ## Completed: M2 — MCP control plane
 
-1. `sogi mcp` exposes seven operations: `understand_task`, `get_context`, `get_state`,
-   `record_decision`, `record_event`, `check_scope`, and `verify`.
+1. `sogi mcp` exposes the control plane: `understand_task`, `get_context`, `localize`,
+   `get_state`, `record_decision`, `record_event`, `check_scope`,
+   `propose_patch`/`apply_patch`, `verify`, and `record_usage`.
 2. The tool logic lives in a testable facade (`SogiMcp`) with a thin FastMCP adapter.
 3. The `mcp` SDK is an optional extra; the rest of Sogi never depends on it.
 
@@ -76,6 +77,30 @@
     Bash-caused changes are observed without voluntary self-reporting; hook
     health counters (`hook_events_received/dropped`, `payload_parse_failures`)
     surface observation-channel problems via `check_scope`.
+
+## Completed: M5 — Patch engine, localization, dependency doctor
+
+1. Governed patch engine (`PatchProvider` port): `sogi patch propose` computes a
+   dry-run diff for a symbol replacement or an ast-grep pattern rewrite without
+   touching the working tree; `sogi patch apply` is the only write path.
+2. Stale-edit protection: symbol regions are content-hashed at proposal time; an
+   `expected_hash` mismatch (or any drift between propose and apply) rejects the
+   edit with an explicit re-localize error. Pattern rewrites are guarded by a
+   worktree fingerprint captured at proposal time.
+3. Scope-checked application: touched files must lie inside the task's compiled
+   scope, unacknowledged violations persist HIGH audit findings and refuse to
+   apply; explicit acknowledgement unblocks the same patch.
+4. Auditable lifecycle: `patch_proposed` / `patch_applied` events carry the full
+   request and diff so replay reproduces patches exactly (`check-integrity` covers
+   them); applied files are recorded as provenance-stamped `file_modified`
+   observations the governor sees like any other edit.
+5. Hierarchical localization (`sogi context --format localization`, MCP `localize`):
+   repository → files → symbols → exact line regions in tiers (HIGH / MEDIUM /
+   RISK DEPENDENCY), with protected callers of edited symbols surfaced.
+6. External dependency doctor: verifies python/git/analyzer CLI (required), MCP
+   SDK/ast-grep/Semgrep/Comby (optional), Docker (research), reports versions and
+   executability, checks pinned `external/revisions.json` revisions for drift,
+   and external checkouts moved under `external/`.
 
 Remaining in M4:
 

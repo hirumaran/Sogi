@@ -11,9 +11,8 @@ dist/
 build/
 .sogi/
 .ast-cache/
-
-# Local infrastructure checkout. Sogi consumes the published package/CLI.
-tree-sitter-analyzer/
+# External reference checkouts (upstream projects; never vendored or imported).
+external/
 
 # Analyzer state created in the demo repository.
 examples/demo_repo/.ast-cache/

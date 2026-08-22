@@ -71,23 +71,63 @@ def test_cli_doctor_reports_repo(tmp_path: Path, capsys: pytest.CaptureFixture[s
     code = main(["doctor", "--repo", str(tmp_path)])
     out = capsys.readouterr().out
     assert "database" in out
-    assert code in {0, 1}  # analyzer may be absent; doctor reports honestly
+    assert "SOGI DEPENDENCY CHECK" in out
+    assert code in {0, 1}  # optional tooling may be absent; doctor reports honestly
 
 
 def test_cli_doctor_missing_analyzer_fails_cleanly(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch
 ) -> None:
-    import builtins
+    import sogi.repository.tree_sitter_provider as tsp
 
-    real_import = builtins.__import__
-
-    def no_analyzer(name: str, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if name == "tree_sitter_analyzer":
-            raise ImportError(name)
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", no_analyzer)
+    monkeypatch.setattr(tsp, "_detect_command", lambda: ("definitely-not-a-real-binary",))
     (tmp_path / ".git").mkdir()
     code = main(["doctor", "--repo", str(tmp_path)])
     assert "tree-sitter-analyzer" in capsys.readouterr().out
     assert code == 1
+
+
+def test_doctor_report_flags_only_required_failures(tmp_path: Path) -> None:
+    from sogi.doctor import OPTIONAL, REQUIRED, CheckResult, DoctorReport, run_doctor
+
+    report = DoctorReport(
+        repo_root=tmp_path,
+        checks=[
+            CheckResult("git", REQUIRED, False, "missing"),
+            CheckResult("ast-grep", OPTIONAL, False, "missing"),
+        ],
+    )
+    assert not report.ok
+    assert report.failed_required == ["git"]
+    rendered = report.render()
+    assert "[FAIL]" in rendered and "ast-grep" in rendered
+
+    # The real collector never marks an optional check as required.
+    collected = run_doctor(None)
+    names = {check.name for check in collected.checks if check.category == REQUIRED}
+    assert {"python", "sogi", "git", "tree-sitter-analyzer"} <= names
+
+
+def test_doctor_detects_revision_drift(monkeypatch) -> None:
+    import json
+
+    import sogi.doctor as doctor_module
+
+    external = doctor_module._EXTERNAL_DIR
+    revisions_file = external / "revisions.json"
+    if not revisions_file.is_file():
+        import pytest
+
+        pytest.skip("external/revisions.json not present")
+    pinned = json.loads(revisions_file.read_text(encoding="utf-8"))
+    first_name = sorted(pinned)[0]
+    pinned[first_name] = "0" * 40
+
+    class _StubRevisionsFile:
+        def read_text(self, *_args, **_kwargs) -> str:
+            return json.dumps(pinned)
+
+    monkeypatch.setattr(doctor_module, "_REVISIONS_FILE", _StubRevisionsFile())
+    result = doctor_module._revision_drift_check()
+    assert not result.ok
+    assert first_name in result.detail

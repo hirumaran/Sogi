@@ -70,6 +70,15 @@ class SogiMcp:
         rid = self._resolve_run(run_id)
         return self.service.get(rid).to_dict()
 
+    def localize(self, run_id: str | None = None) -> dict[str, Any]:
+        """Return tiered file → symbol → region localization for the task."""
+        from sogi.context.localizer import Localizer
+
+        rid = self._resolve_run(run_id)
+        record = self.service.get(rid)
+        localizer = Localizer(self.service._provider_for())
+        return localizer.localize(record.task).to_dict()
+
     def record_decision(self, decision: str, run_id: str | None = None) -> dict[str, Any]:
         """Record a decision made during the run."""
         rid = self._resolve_run(run_id)
@@ -174,6 +183,23 @@ class SogiMcp:
         )
         return {"run_id": rid, "recorded": True}
 
+    def propose_patch(self, request: dict[str, Any], run_id: str | None = None) -> dict[str, Any]:
+        """Propose a governed structural edit (dry-run; nothing is modified).
+
+        Two operations:
+        - ``replace_symbol``: replace a symbol's body. Pass ``expected_hash``
+          from your last inspection; a mismatch is rejected as a stale edit.
+        - ``rewrite``: ast-grep pattern rewrite (``pattern`` + ``rewrite``,
+          optional ``paths``). Requires the ast-grep CLI.
+        """
+        rid = self._resolve_run(run_id)
+        return self.service.propose_patch(rid, request)
+
+    def apply_patch(self, patch_id: str, run_id: str | None = None) -> dict[str, Any]:
+        """Apply a previously proposed patch after re-validating its guards."""
+        rid = self._resolve_run(run_id)
+        return self.service.apply_patch(rid, patch_id)
+
     def _resolve_run(self, run_id: str | None) -> str:
         rid = run_id or self.current_run_id
         if rid is None:
@@ -248,6 +274,19 @@ def build_server(service: RunService, *, run_id: str | None = None) -> Any:
         return facade.get_state(run_id)
 
     @mcp.tool()
+    def localize(run_id: str | None = None) -> dict[str, Any]:
+        """Return hierarchical localization for the run's task.
+
+        Tiers: HIGH (inspect/edit first), MEDIUM (supporting context),
+        RISK DEPENDENCY (callers that must keep working). Each entry names the
+        exact file, symbol, and line region.
+
+        Args:
+            run_id: Optional run id. Defaults to the current run.
+        """
+        return facade.localize(run_id)
+
+    @mcp.tool()
     def record_decision(decision: str, run_id: str | None = None) -> dict[str, Any]:
         """Record a decision made during the current run.
 
@@ -315,6 +354,63 @@ def build_server(service: RunService, *, run_id: str | None = None) -> Any:
             run_id: Optional run id. Defaults to the current run.
         """
         return facade.verify(run_id)
+
+    @mcp.tool()
+    def propose_patch(
+        operation: str,
+        symbol: str | None = None,
+        file: str | None = None,
+        expected_hash: str | None = None,
+        replacement: str | None = None,
+        pattern: str | None = None,
+        rewrite: str | None = None,
+        paths: list[str] | None = None,
+        reason: str = "",
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Propose a governed structural edit (dry-run; nothing is modified yet).
+
+        Prefer this over raw file edits so Sogi can guard scope and staleness.
+
+        Args:
+            operation: "replace_symbol" or "rewrite".
+            symbol: [replace_symbol] Symbol whose body is replaced, e.g.
+                "AuthService.refresh_token".
+            file: [replace_symbol] Optional file hint for ambiguous names.
+            expected_hash: [replace_symbol] Content hash observed at inspection
+                time. A mismatch is rejected as a stale edit — re-localize.
+            replacement: [replace_symbol] The new symbol body.
+            pattern: [rewrite] ast-grep search pattern.
+            rewrite: [rewrite] ast-grep rewrite pattern.
+            paths: [rewrite] Restrict the rewrite to these paths.
+            reason: Why this edit is required.
+            run_id: Optional run id. Defaults to the current run.
+        """
+        request: dict[str, Any] = {"operation": operation, "reason": reason}
+        if operation == "replace_symbol":
+            request.update(
+                {
+                    "symbol": symbol,
+                    "file": file,
+                    "expected_hash": expected_hash,
+                    "replacement": replacement or "",
+                }
+            )
+        else:
+            request.update(
+                {"pattern": pattern, "rewrite": rewrite, "paths": paths or []}
+            )
+        return facade.propose_patch(request, run_id)
+
+    @mcp.tool()
+    def apply_patch(patch_id: str, run_id: str | None = None) -> dict[str, Any]:
+        """Apply a proposed patch after re-validating staleness and scope.
+
+        Args:
+            patch_id: Id returned by propose_patch.
+            run_id: Optional run id. Defaults to the current run.
+        """
+        return facade.apply_patch(patch_id, run_id)
 
     @mcp.tool()
     def record_usage(

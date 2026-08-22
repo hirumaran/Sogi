@@ -25,6 +25,8 @@ EVENT_TYPES = frozenset(
         "verification_started",
         "verification_result",
         "usage_recorded",
+        "patch_proposed",
+        "patch_applied",
         "run_completed",
     }
 )

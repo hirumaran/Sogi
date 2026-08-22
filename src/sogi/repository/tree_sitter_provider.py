@@ -36,10 +36,16 @@ def _detect_command() -> tuple[str, ...]:
     installed = shutil.which("tree-sitter-analyzer")
     if installed:
         return (installed,)
+    # Development fallback: the workspace-local checkout under external/
+    # (legacy root-level layout supported for older working copies).
     workspace = Path(__file__).resolve().parents[3]
-    local = workspace / "tree-sitter-analyzer" / ".venv" / "bin" / "tree-sitter-analyzer"
-    if local.exists():
-        return (str(local),)
+    for relative in (
+        "external/tree-sitter-analyzer",
+        "tree-sitter-analyzer",
+    ):
+        local = workspace / relative / ".venv" / "bin" / "tree-sitter-analyzer"
+        if local.exists():
+            return (str(local),)
     return ("uvx", "--from", "tree-sitter-analyzer", "tree-sitter-analyzer")
 
 
