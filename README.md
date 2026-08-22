@@ -11,23 +11,33 @@ boundary.
 
 ## Current milestone
 
-Sogi now covers the full control-plane loop:
+Sogi now covers a trustworthy, closed control-plane loop:
 
 - a `RunRecord` binds `TaskSpec`, `EngineeringState`, compiled context, and telemetry;
-- every observable event is appended to an append-only event log (the source of truth);
-- runs persist to SQLite (`.sogi/sogi.db`) with a human-readable JSON snapshot per run;
+- every observable event is appended to an append-only event log (the source of truth),
+  with `sogi run rebuild` / `check-integrity` proving the projection matches the stream;
+- runs persist to SQLite (`.sogi/sogi.db`) with atomic event+projection transactions;
+- **host hooks observe without trust**: `sogi agent claude` wires PreToolUse/PostToolUse
+  hooks so every file read, edit, and Bash command — including files changed *by* Bash —
+  is recorded from actual Git state, whether or not the agent self-reports;
 - the deterministic **Engineering Governor** watches the event stream for repeated
-  exploration, failure loops, and scope expansion, raising one targeted warning per
-  pattern (deduplicated by kind+subject);
-- the **independent verifier** discovers the repository's own declared checks
-  (pytest/ruff/mypy, npm scripts, Makefile targets, cargo), executes them, and maps
-  evidence to each acceptance criterion as SATISFIED / VIOLATED / UNVERIFIED — it
-  never equates "tests passed" with "every requirement proven";
-- **run metrics** quantify exploration, interventions, context use, verification,
-  and duration, providing the measurement base for controlled agent comparisons;
-- an MCP server exposes seven tools (`understand_task`, `get_context`, `get_state`,
-  `record_decision`, `record_event`, `check_scope`, `verify`);
-- `sogi agent claude` launches Claude Code already wired to Sogi's MCP server.
+  exploration, failure loops, and scope expansion, with severities (HIGH/CRITICAL
+  findings block completion until explicitly acknowledged);
+- patch assessment detects deleted/weakened tests (tampering), dependency-manifest
+  changes, security-sensitive paths, and out-of-scope edits on every verification;
+- the **independent verifier** discovers repository-declared checks (pytest/ruff/mypy,
+  npm scripts, Makefile targets, cargo) or explicit `.sogi.toml` commands, executes
+  them, and maps evidence to each acceptance criterion as SATISFIED / VIOLATED /
+  UNVERIFIED — it never equates "tests passed" with "every requirement proven";
+- a **verification watermark** (event sequence + content-sensitive worktree
+  fingerprint) rejects stale `verify → edit → complete` sequences at the gate;
+- **usage metrics** capture host-reported tokens/cost with explicit provenance, plus
+  exploration, interventions, verification outcomes, and duration (`sogi metrics`);
+- an MCP server exposes eight tools (`understand_task`, `get_context`, `get_state`,
+  `record_decision`, `record_event`, `check_scope`, `verify`, `record_usage`);
+- a controlled-evaluation harness (`sogi eval run` / `sogi eval compare`) supports
+  baseline-vs-Sogi arms over repeatable task suites with raw JSONL results;
+- `sogi doctor` diagnoses environment health; `.sogi.toml` keeps policy in-repo.
 
 ## Quick start
 

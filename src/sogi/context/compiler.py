@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from sogi.core.phases import EngineeringPhase
 from sogi.core.task_spec import TaskSpec
 from sogi.repository.provider import RepositoryProvider, Symbol
 
@@ -43,6 +44,8 @@ class CompiledContext:
     selected_tokens: int
     token_budget: int
     suggested_next_investigation: str
+    phase: str = EngineeringPhase.INVESTIGATE.value
+    selection_strategy: str = "phase-aware-mmr"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +59,8 @@ class CompiledContext:
             ],
             "related_files": list(self.related_files),
             "related_tests": list(self.related_tests),
+            "phase": self.phase,
+            "selection_strategy": self.selection_strategy,
             "metrics": {
                 "repository_estimated_tokens": self.repository_estimated_tokens,
                 "candidate_tokens": self.candidate_tokens,
@@ -91,6 +96,8 @@ class CompiledContext:
             selected_tokens=int(metrics.get("selected_tokens", 0)),
             token_budget=int(metrics.get("token_budget", 0)),
             suggested_next_investigation=str(payload.get("suggested_next_investigation", "")),
+            phase=str(payload.get("phase", EngineeringPhase.INVESTIGATE.value)),
+            selection_strategy=str(payload.get("selection_strategy", "legacy-score")),
         )
 
     def render(self) -> str:
@@ -106,6 +113,7 @@ class CompiledContext:
         return (
             "SOGI CONTEXT\n"
             "============\n\n"
+            f"PHASE\n{self.phase.upper()}\n\n"
             f"OBJECTIVE\n{self.task.objective}\n\n"
             f"ACCEPTANCE CRITERIA\n{criteria}\n\n"
             f"CONSTRAINTS\n{constraints}\n\n"
@@ -129,11 +137,22 @@ class ContextCompiler:
         self.provider = provider
         self.token_budget = token_budget
 
-    def compile(self, task: TaskSpec, *, prepare: bool = True) -> CompiledContext:
+    def compile(
+        self,
+        task: TaskSpec,
+        *,
+        prepare: bool = True,
+        phase: EngineeringPhase | str = EngineeringPhase.INVESTIGATE,
+    ) -> CompiledContext:
+        """Compile bounded, phase-appropriate, non-redundant context."""
+        resolved_phase = EngineeringPhase(phase)
         index_stats = self.provider.prepare() if prepare else {}
         snapshot = self.provider.discover(task.objective)
         ranked = sorted(
-            (rank_symbol(symbol, task.concepts) for symbol in snapshot.symbols),
+            (
+                rank_symbol(symbol, task.concepts, phase=resolved_phase)
+                for symbol in snapshot.symbols
+            ),
             key=lambda item: (-item.score, item.token_cost, item.symbol.file, item.symbol.line),
         )
         selected = _select_under_budget(ranked, self.token_budget)
@@ -161,18 +180,44 @@ class ContextCompiler:
             selected_tokens=sum(item.token_cost for item in selected),
             token_budget=self.token_budget,
             suggested_next_investigation=next_step,
+            phase=resolved_phase.value,
         )
 
 
 def _select_under_budget(
     ranked: list[RankedContext], token_budget: int
 ) -> tuple[RankedContext, ...]:
+    """Greedily select relevant context while penalizing redundancy.
+
+    This is a deterministic Maximal Marginal Relevance (MMR) variant. The
+    first item is the most relevant candidate; subsequent items balance their
+    base score against similarity to already selected symbols. It prevents a
+    crowded file from consuming the whole budget when another relevant file
+    would add new information.
+    """
     selected: list[RankedContext] = []
     remaining = token_budget
-    for item in ranked:
-        if item.token_cost <= remaining:
-            selected.append(item)
-            remaining -= item.token_cost
+    candidates = list(ranked)
+    while candidates:
+        fitting = [item for item in candidates if item.token_cost <= remaining]
+        if not fitting:
+            break
+        if not selected:
+            choice = fitting[0]
+        else:
+            choice = max(
+                fitting,
+                key=lambda item: (
+                    _marginal_relevance(item, selected),
+                    item.score,
+                    -item.token_cost,
+                    item.symbol.file,
+                    -item.symbol.line,
+                ),
+            )
+        selected.append(choice)
+        candidates.remove(choice)
+        remaining -= choice.token_cost
     if selected or not ranked:
         return tuple(selected)
     first = ranked[0]
@@ -191,6 +236,33 @@ def _select_under_budget(
             token_cost=estimate_tokens(render_symbol(truncated_symbol)),
         ),
     )
+
+
+def _marginal_relevance(item: RankedContext, selected: list[RankedContext]) -> float:
+    relevance_weight = 0.80
+    redundancy = max(_symbol_similarity(item.symbol, other.symbol) for other in selected)
+    return relevance_weight * item.score - (1.0 - relevance_weight) * redundancy
+
+
+def _symbol_similarity(left: Symbol, right: Symbol) -> float:
+    if left.file == right.file:
+        return 1.0
+    left_parts = _identity_terms(left)
+    right_parts = _identity_terms(right)
+    overlap = len(left_parts & right_parts)
+    union = len(left_parts | right_parts)
+    lexical = overlap / union if union else 0.0
+    left_dir = left.file.replace("\\", "/").rsplit("/", 1)[0]
+    right_dir = right.file.replace("\\", "/").rsplit("/", 1)[0]
+    directory = 0.35 if left_dir and left_dir == right_dir else 0.0
+    return max(lexical, directory)
+
+
+def _identity_terms(symbol: Symbol) -> set[str]:
+    normalized = f"{symbol.name} {symbol.file}".replace("\\", "/").lower()
+    for marker in ("/", ".", "-", "_"):
+        normalized = normalized.replace(marker, " ")
+    return {part for part in normalized.split() if len(part) > 1}
 
 
 def estimate_repository_tokens(root: Path) -> int:

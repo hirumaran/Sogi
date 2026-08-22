@@ -265,8 +265,13 @@ class RunService:
 
         def mutate(record: RunRecord, now: str) -> list[Event]:
             token_budget = budget or record.telemetry.context_budget
+            selection_phase = (
+                EngineeringPhase.INVESTIGATE
+                if record.state.phase is EngineeringPhase.UNDERSTAND
+                else record.state.phase
+            )
             compiled = ContextCompiler(self._provider_for(), token_budget=token_budget).compile(
-                record.task, prepare=prepare
+                record.task, prepare=prepare, phase=selection_phase
             )
             record.context = compiled
             record.telemetry.context_budget = token_budget
@@ -283,6 +288,7 @@ class RunService:
                             "selected_tokens": compiled.selected_tokens,
                             "budget": token_budget,
                             "files": list(compiled.related_files),
+                            "phase": compiled.phase,
                         },
                     ),
                     Event(
@@ -304,6 +310,7 @@ class RunService:
                         "selected_tokens": compiled.selected_tokens,
                         "budget": token_budget,
                         "files": list(compiled.related_files),
+                        "phase": compiled.phase,
                     },
                 )
             ]

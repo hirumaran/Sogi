@@ -59,13 +59,36 @@
    the governor and prior assessments, and tied to the content-sensitive
    snapshot so unacknowledged HIGH/CRITICAL findings block completion.
 6. Repository-local configuration (`.sogi.toml`) and `sogi doctor`.
-7. CI across supported Python versions with warnings-as-errors.
+7. CI across macOS/Linux, Python 3.10-3.13, warnings-as-errors, package build.
+8. Event replay: deterministic reducer over the full event stream,
+   `sogi run rebuild`, and `sogi run check-integrity` comparing projection to
+   stream. Warning events carry subjects so replay matches the projection.
+9. Usage/cost metrics: host/model-reported tokens and cost via `record_usage`
+   (service + MCP tool), surfaced in metrics with explicit provenance —
+   unreported usage stays None rather than being estimated.
+10. Evaluation harness: task suites (`sogi eval run`), baseline/sogi arms with
+    identical tasks/limits, shell or mock agent runners, raw JSONL results, and
+    arm comparison (`sogi eval compare`). Token deltas only computed when both
+    arms actually reported usage.
+11. Trustworthy observation: PreToolUse/PostToolUse hooks bound to an explicit
+    session id; Git-worktree reconciliation derives file modifications from
+    actual repository state after mutation-capable tools (Bash included), so
+    Bash-caused changes are observed without voluntary self-reporting; hook
+    health counters (`hook_events_received/dropped`, `payload_parse_failures`)
+    surface observation-channel problems via `check_scope`.
+
+Remaining in M4:
+
+1. Real Claude Code end-to-end trial (hooks + MCP together) on a live session.
+2. Full multi-session run binding beyond the newest-run fallback.
+3. Evidence providers richer than filename matching (test node IDs, coverage).
+4. Sandboxed/restricted check execution policy.
 
 ## Later phases (deliberately not started)
 
 1. Phase-aware context compiler with progressive disclosure and MMR diversity.
-2. Controlled evaluation harness (Sogi-on vs Sogi-off, identical tasks/models).
+2. Internal task suite for controlled experiments at scale; SWE-bench/OpenHands.
 3. Second coding-agent adapter (Codex) proving agent agnosticism.
-4. Event-sourced replay, fault injection, counterfactual experiments.
+4. Fault injection and counterfactual replay.
 
 No performance claim should be published without controlled results.
