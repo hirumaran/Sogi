@@ -136,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     hook.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
     hook.add_argument("--run", help="Attach the observation to an explicit run")
     hook.add_argument("--session", help="Session id binding observations to one agent session")
+    hook.add_argument("--host", default="claude-code", help="Agent host label for provenance")
     hook.add_argument("--debug", action="store_true", help="Surface hook errors")
 
     patch = subcommands.add_parser(
@@ -357,7 +358,7 @@ def _cmd_hook(args: argparse.Namespace) -> int:
             with RunService(repo) as service:
                 run_id = service.active_run_id() or ""
         if run_id:
-            hook_ingest.process_payload(repo, payload, run_id, args.session)
+            hook_ingest.process_payload(repo, payload, run_id, args.session, host=args.host)
         hook_ingest.note_health(repo, received=1)
     except Exception:
         hook_ingest.note_health(repo, dropped=1, parse_failed=1)

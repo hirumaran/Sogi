@@ -91,19 +91,36 @@ class SogiMcp:
         Governor checks run automatically against the appended event.
         """
         rid = self._resolve_run(run_id)
-        if event_type == "file_read" and path:
-            self.service.record_file_read(rid, path)
-        elif event_type == "file_modified" and path:
-            self.service.record_file_modified(rid, path)
-        elif event_type == "command_started" and command:
-            self.service.command_started(rid, command)
-        elif event_type == "command_finished" and command:
-            self.service.command_finished(rid, command, exit_code=exit_code, success=success)
-        else:
+        if not (
+            (event_type in ("file_read", "file_modified") and path)
+            or (event_type in ("command_started", "command_finished") and command)
+        ):
             raise ValueError(
                 f"Unsupported observation: type={event_type!r} "
                 "(need file_read, file_modified, command_started, or "
                 "command_finished with matching path/command)"
+            )
+        # Voluntary agent reports are recorded with explicit provenance so
+        # they are distinguishable from trusted host-hook observations.
+        provenance = {
+            "observation_source": "agent_reported",
+            "tool_name": event_type,
+            "session_id": "mcp",
+            "host": "mcp",
+        }
+        if event_type == "file_read":
+            self.service.record_file_read(rid, path, provenance=provenance)  # type: ignore[arg-type]
+        elif event_type == "file_modified":
+            self.service.record_file_modified(rid, path, provenance=provenance)  # type: ignore[arg-type]
+        elif event_type == "command_started":
+            self.service.command_started(rid, command, provenance=provenance)  # type: ignore[arg-type]
+        else:
+            self.service.command_finished(
+                rid,
+                command,  # type: ignore[arg-type]
+                exit_code=exit_code,
+                success=success,
+                provenance=provenance,
             )
         return {"run_id": rid, "recorded": True, "type": event_type}
 

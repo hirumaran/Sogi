@@ -52,6 +52,29 @@ class RunNotFoundError(KeyError):
 #: Test-shaped paths are handled by tampering checks, not scope checks.
 TEST_FILE_LIKE = re.compile(r"(^|/)tests?/|(^|/)test_[^/]*\.py$|[^/]*_test\.py$")
 
+#: Canonical provenance keys attached to observation events. Every stored
+#: event must be attributable: which host, which session, which tool call,
+#: and whether the source was the trusted host hook or voluntary agent
+#: self-reporting.
+PROVENANCE_KEYS = (
+    "host",
+    "session_id",
+    "tool_call_id",
+    "tool_name",
+    "hook_event_name",
+    "observation_source",
+)
+
+
+def _provenance_fields(provenance: dict[str, Any] | None) -> dict[str, Any]:
+    """Filter to known provenance keys; defaults to agent self-reporting."""
+    fields = {
+        key: value for key in PROVENANCE_KEYS if (value := (provenance or {}).get(key)) is not None
+    }
+    if "observation_source" not in fields:
+        fields["observation_source"] = "agent_reported"
+    return fields
+
 
 class CompletionGateError(RuntimeError):
     """Raised when completion is attempted without sufficient evidence.
@@ -568,15 +591,26 @@ class RunService:
 
         self._mutate(run_id, mutate)
 
-    def record_file_read(self, run_id: str, path: str) -> None:
+    def record_file_read(
+        self, run_id: str, path: str, *, provenance: dict[str, Any] | None = None
+    ) -> None:
         def mutate(record: RunRecord, now: str) -> list[Event]:
             record.state.files_examined.append(path)
             record.telemetry.files_read.append(path)
-            return [Event(type="file_read", run_id=run_id, timestamp=now, payload={"path": path})]
+            return [
+                Event(
+                    type="file_read",
+                    run_id=run_id,
+                    timestamp=now,
+                    payload={"path": path, **_provenance_fields(provenance)},
+                )
+            ]
 
         self._mutate(run_id, mutate)
 
-    def record_file_modified(self, run_id: str, path: str) -> None:
+    def record_file_modified(
+        self, run_id: str, path: str, *, provenance: dict[str, Any] | None = None
+    ) -> None:
         def mutate(record: RunRecord, now: str) -> list[Event]:
             if path not in record.state.files_modified:
                 record.state.files_modified.append(path)
@@ -587,13 +621,15 @@ class RunService:
                     type="file_modified",
                     run_id=run_id,
                     timestamp=now,
-                    payload={"path": path},
+                    payload={"path": path, **_provenance_fields(provenance)},
                 )
             ]
 
         self._mutate(run_id, mutate)
 
-    def command_started(self, run_id: str, command: str) -> None:
+    def command_started(
+        self, run_id: str, command: str, *, provenance: dict[str, Any] | None = None
+    ) -> None:
         def mutate(record: RunRecord, now: str) -> list[Event]:
             record.telemetry.commands.append(CommandRecord(command=command, started_at=now))
             return [
@@ -601,7 +637,7 @@ class RunService:
                     type="command_started",
                     run_id=run_id,
                     timestamp=now,
-                    payload={"command": command},
+                    payload={"command": command, **_provenance_fields(provenance)},
                 )
             ]
 
@@ -615,6 +651,7 @@ class RunService:
         result: str | None = None,
         exit_code: int | None = None,
         success: bool | None = None,
+        provenance: dict[str, Any] | None = None,
     ) -> None:
         def mutate(record: RunRecord, now: str) -> list[Event]:
             # Match the earliest-started open instance (FIFO) so that when the
@@ -658,6 +695,7 @@ class RunService:
                         "exit_code": exit_code,
                         "success": success,
                         "result": result,
+                        **_provenance_fields(provenance),
                     },
                 )
             ]

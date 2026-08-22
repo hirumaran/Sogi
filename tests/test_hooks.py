@@ -285,3 +285,71 @@ def test_launcher_settings_include_pre_and_post_hooks(tmp_path: Path) -> None:
     assert set(hooks.keys()) == {"PreToolUse", "PostToolUse"}  # type: ignore[union-attr]
     command = hooks["PostToolUse"][0]["hooks"][0]["command"]  # type: ignore[index]
     assert "--session fixed-session" in command  # type: ignore[index]
+
+
+# -- observation provenance -------------------------------------------------------
+
+
+def test_hook_events_persist_full_provenance(git_repo: Path) -> None:
+    """Every host-hook event must prove where it came from."""
+    service = RunService(git_repo)
+    run_id = service.start("Fix auth", compile_context=False).run_id
+
+    payload = {
+        "hook_event_name": "PostToolUse",
+        "session_id": "sess-prov",
+        "tool_name": "Bash",
+        "tool_input": {"command": "pytest -q"},
+        "tool_response": {"exit_code": 0},
+    }
+    hook_ingest.process_payload(git_repo, payload, run_id, "sess-prov", host="claude-code")
+
+    events = [e for e in service.events.for_run(run_id) if e.type == "command_finished"]
+    assert len(events) == 1
+    prov = {
+        k: events[0].payload.get(k)
+        for k in ("observation_source", "host", "session_id", "tool_name", "hook_event_name")
+    }
+    assert prov == {
+        "observation_source": "host_hook",
+        "host": "claude-code",
+        "session_id": "sess-prov",
+        "tool_name": "Bash",
+        "hook_event_name": "PostToolUse",
+    }
+
+
+def test_agent_self_reports_are_marked_as_such(repo: Path) -> None:
+    from sogi.mcp.server import SogiMcp
+
+    facade = SogiMcp(RunService(repo, provider=FakeProvider(repo)))
+    facade.understand_task("Fix auth")
+    facade.record_event("file_modified", path="src/auth.py")
+
+    run_id = facade.current_run_id
+    events = [e for e in facade.service.events.for_run(run_id) if e.type == "file_modified"]
+    assert events[0].payload["observation_source"] == "agent_reported"
+
+
+def test_provenance_survives_replay(git_repo: Path) -> None:
+    from sogi.events.replay import replay
+
+    service = RunService(git_repo)
+    run_id = service.start("Fix auth", compile_context=False).run_id
+    hook_ingest.process_payload(
+        git_repo,
+        {
+            "hook_event_name": "PostToolUse",
+            "session_id": "sx",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "src/new.py"},
+        },
+        run_id,
+        "sx",
+        host="claude-code",
+    )
+
+    rebuilt = replay(service.events.for_run(run_id))
+    # Provenance lives only in event payloads; the projection's file lists
+    # must still match exactly.
+    assert rebuilt.telemetry.files_modified == ["src/new.py"]

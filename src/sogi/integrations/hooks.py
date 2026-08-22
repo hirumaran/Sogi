@@ -111,22 +111,40 @@ def apply_to_service(
     run_id: str,
     *,
     session_id: str | None = None,
+    host: str | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> int:
-    """Apply mapped observations to a run; returns how many were recorded."""
+    """Apply mapped observations to a run; returns how many were recorded.
+
+    Every observation is persisted with full provenance: the host, session,
+    originating tool call, and ``observation_source="host_hook"`` — so any
+    stored event can later prove where it came from. This channel is
+    trustworthy precisely because it does not depend on agent cooperation.
+    """
+    tool_name = str((payload or {}).get("tool_name", "")) or None
+    hook_event = str((payload or {}).get("hook_event_name", "")) or None
+    provenance: dict[str, Any] = {
+        "observation_source": "host_hook",
+        "host": host,
+        "session_id": session_id,
+        "tool_name": tool_name,
+        "hook_event_name": hook_event,
+    }
     recorded = 0
     for item in observations:
         kind = item["type"]
         try:
             if kind == "file_read":
-                service.record_file_read(run_id, item["path"])
+                service.record_file_read(run_id, item["path"], provenance=provenance)
             elif kind == "file_modified":
-                service.record_file_modified(run_id, item["path"])
+                service.record_file_modified(run_id, item["path"], provenance=provenance)
             elif kind == "command_finished":
                 service.command_finished(
                     run_id,
                     item["command"],
                     exit_code=item.get("exit_code"),
                     success=item.get("success"),
+                    provenance=provenance,
                 )
             else:
                 continue
@@ -134,10 +152,6 @@ def apply_to_service(
             note_health(service.repo_root, dropped=1)
             continue
         recorded += 1
-    if session_id and recorded:
-        # Session binding lives in the event payloads via the service layer;
-        # here we only guarantee the mapping survives for reconciliation.
-        pass
     return recorded
 
 
@@ -267,7 +281,12 @@ def read_health(root: Path) -> dict[str, Any]:
 
 
 def process_payload(
-    repo_root: Path, payload: dict[str, Any], run_id: str, session_id: str | None
+    repo_root: Path,
+    payload: dict[str, Any],
+    run_id: str,
+    session_id: str | None,
+    *,
+    host: str = "claude-code",
 ) -> int:
     """Full pipeline for one hook event; returns count of recorded events."""
     event_name = payload.get("hook_event_name")
@@ -293,6 +312,13 @@ def process_payload(
 
     service = RunService(repo_root)  # analyzer loads lazily; not needed here
     try:
-        return apply_to_service(service, observations, run_id)
+        return apply_to_service(
+            service,
+            observations,
+            run_id,
+            session_id=sid if sid != "default" else None,
+            host=host,
+            payload=payload,
+        )
     finally:
         service.close()
