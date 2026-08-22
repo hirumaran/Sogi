@@ -77,6 +77,8 @@ def _to_nodeid(classname: str, name: str) -> str:
 
 
 def make_temp_report() -> Path:
+    import os
+
     descriptor, name = tempfile.mkstemp(suffix=".xml")
-    Path(name).unlink(missing_ok=True)  # pytest creates it; we just need the path
-    return Path(descriptor).with_name(name)
+    os.close(descriptor)  # pytest creates the file; we only need the path
+    return Path(name)
