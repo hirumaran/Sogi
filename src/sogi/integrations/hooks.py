@@ -144,6 +144,8 @@ def apply_to_service(
 
 
 def _porcelain(root: Path) -> list[str]:
+    from sogi.repository.worktree import filter_transient
+
     try:
         completed = subprocess.run(
             ["git", "-C", str(root), "status", "--porcelain"],
@@ -155,7 +157,9 @@ def _porcelain(root: Path) -> list[str]:
         return []
     if completed.returncode != 0:
         return []
-    return [line[3:].strip().strip('"') for line in completed.stdout.splitlines() if line.strip()]
+    return filter_transient(
+        [line[3:].strip().strip('"') for line in completed.stdout.splitlines() if line.strip()]
+    )
 
 
 def capture_worktree(root: Path, session_id: str) -> bool:

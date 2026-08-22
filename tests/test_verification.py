@@ -204,11 +204,24 @@ def test_verifier_inconclusive_without_checks(tmp_path: Path) -> None:
     assert report.notes
 
 
-def test_verifier_unknown_command_is_failure_not_crash(tmp_path: Path) -> None:
+def test_verifier_unknown_command_is_unavailable_not_failure(tmp_path: Path) -> None:
+    # A missing executable is an environment fact (exit 127), not evidence
+    # that the code fails its requirements — so it is reported as
+    # unexecuted rather than failed, and cannot fabricate a FAIL.
     bogus = check("bogus", "sogi-definitely-not-a-command-xyz --version", "test")
     report = Verifier(tmp_path).verify(make_record(), checks=(bogus,))
-    assert report.outcome == "FAIL"
-    assert report.checks[0].success is False
+    assert report.outcome == "INCONCLUSIVE"
+    assert report.checks[0].success is None
+
+
+def test_verifier_tool_missing_does_not_fail_criteria(tmp_path: Path) -> None:
+    record = make_record(criteria=("Expired refresh tokens redirect to /login",))
+    missing = check("pytest", "sogi-missing-tool-xyz", "test")
+    report = Verifier(tmp_path).verify(record, checks=(missing,))
+    assert report.outcome == "INCONCLUSIVE"
+    # The criterion stays UNVERIFIED with its matching evidence listed.
+    assert report.criteria[0].status == "UNVERIFIED"
+    assert report.criteria[0].evidence == ("tests/test_refresh.py",)
 
 
 def test_verifier_pass_with_unverified(tmp_path: Path) -> None:

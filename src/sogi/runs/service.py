@@ -805,15 +805,18 @@ class RunService:
         one ``verification_result`` event per criterion.
         """
         record = self.get(run_id)
-        discovered = checks if checks is not None else discover_checks(self.repo_root)
-        # Explicit .sogi.toml commands run alongside repository-declared ones.
-        configured = tuple(
-            DiscoveredCheck(name=f"config: {command}", command=command, kind="test")
-            for command in self.config.verification_commands
-        )
-        report = Verifier(self.repo_root, timeout=timeout).verify(
-            record, checks=discovered + configured
-        )
+        if checks is not None:
+            discovered = checks
+        elif self.config.verification_commands:
+            # Explicit configuration is authoritative: the repository author
+            # knows which commands actually work in this environment.
+            discovered = tuple(
+                DiscoveredCheck(name=f"config: {command}", command=command, kind="test")
+                for command in self.config.verification_commands
+            )
+        else:
+            discovered = discover_checks(self.repo_root)
+        report = Verifier(self.repo_root, timeout=timeout).verify(record, checks=discovered)
         fingerprint = capture_fingerprint(self.repo_root)
         # Assess the working-tree patch independently of the agent's claims, so
         # an agent cannot skip tampering/scope/dependency scrutiny by simply

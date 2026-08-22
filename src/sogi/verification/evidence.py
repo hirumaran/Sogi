@@ -110,8 +110,9 @@ def map_criteria(
 ) -> tuple[CriterionResult, ...]:
     """Map every acceptance criterion to SATISFIED / VIOLATED / UNVERIFIED."""
     test_results = [result for result in results if result.check.kind == "test"]
-    tests_executed = bool(test_results)
-    tests_passed = tests_executed and all(result.success for result in test_results)
+    executed = [result for result in test_results if result.success is not None]
+    tests_executed = bool(executed)
+    tests_passed = tests_executed and all(result.success for result in executed)
 
     mapped: list[CriterionResult] = []
     for criterion in record.task.acceptance_criteria:

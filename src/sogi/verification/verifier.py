@@ -20,6 +20,9 @@ from .evidence import CriterionResult, map_criteria
 #: Truncate captured output so reports stay readable and storage stays small.
 _OUTPUT_TAIL_CHARS = 2000
 
+#: Shell-level codes meaning the command could not be launched at all.
+_TOOL_NOT_FOUND_CODES = frozenset({126, 127})
+
 
 @dataclass(frozen=True)
 class CheckResult:
@@ -118,9 +121,10 @@ class Verifier:
         notes: list[str] = []
 
         failed = [result for result in results if result.success is False]
-        if not results:
+        executable = [result for result in results if result.success is not None]
+        if not results or not executable:
             outcome = "INCONCLUSIVE"
-            notes = ["No repository checks were discovered; nothing was verified."]
+            notes = ["No repository checks could be executed; nothing was verified."]
         elif failed:
             outcome = "FAIL"
         else:
@@ -162,6 +166,16 @@ class Verifier:
         except OSError as exc:
             return CheckResult(check=check, success=False, output_tail=str(exc))
         output = (completed.stdout or "") + (completed.stderr or "")
+        if completed.returncode in _TOOL_NOT_FOUND_CODES:
+            # The tool itself is not installed: that is an environment fact,
+            # not evidence that the code fails its requirements.
+            tail = output[-_OUTPUT_TAIL_CHARS:] if output else f"exit {completed.returncode}"
+            return CheckResult(
+                check=check,
+                success=None,
+                exit_code=completed.returncode,
+                output_tail=tail[:200],
+            )
         return CheckResult(
             check=check,
             success=completed.returncode == 0,

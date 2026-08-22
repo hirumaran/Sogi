@@ -15,6 +15,30 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+#: Generated artifacts that appear in `git status` on repositories without a
+#: .gitignore. They are tooling noise, not engineering changes, so they are
+#: excluded from fingerprints and reconciliation alike.
+TRANSIENT_PREFIXES = (
+    ".sogi/",
+    "__pycache__/",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    "node_modules/",
+)
+
+
+def _is_transient(path: str) -> bool:
+    return (
+        path.startswith(TRANSIENT_PREFIXES)
+        or "/__pycache__/" in path
+        or path.endswith((".pyc", ".pyo"))
+    )
+
+
+def filter_transient(paths: list[str]) -> list[str]:
+    return [path for path in paths if path and not _is_transient(path)]
+
 
 @dataclass(frozen=True)
 class WorktreeFingerprint:
@@ -53,8 +77,10 @@ def capture_fingerprint(repo_root: Path) -> WorktreeFingerprint:
     _feed(hasher, b"unstaged", (_git(root, "diff", "--unified=0") or "").encode("utf-8"))
     # Untracked files: path plus a streaming per-file content hash (git diff
     # never includes untracked files, so they must be folded in explicitly).
+    # Transient tooling artifacts are excluded so running the checks
+    # themselves cannot invalidate their own verification.
     untracked = _git(root, "ls-files", "--others", "--exclude-standard") or ""
-    for raw in untracked.splitlines():
+    for raw in filter_transient(untracked.splitlines()):
         path = raw.strip()
         if not path:
             continue
