@@ -69,6 +69,42 @@ class VerificationRecord:
             raise ValueError(f"Invalid verification status: {self.status!r}")
 
 
+@dataclass(frozen=True)
+class VerificationSnapshot:
+    """A watermark pinning evidence to repository and stream state.
+
+    Verification is only valid while nothing observable changed afterwards:
+    any later ``file_modified`` event advances the stream past
+    ``event_sequence``, and any worktree mutation changes the fingerprint.
+    Either drift marks the verification STALE for completion-gating purposes.
+    """
+
+    event_sequence: int
+    verified_at: str = field(default_factory=_now)
+    git_head: str | None = None
+    diff_hash: str | None = None
+    outcome: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "event_sequence": self.event_sequence,
+            "verified_at": self.verified_at,
+            "git_head": self.git_head,
+            "diff_hash": self.diff_hash,
+            "outcome": self.outcome,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> VerificationSnapshot:
+        return cls(
+            event_sequence=int(payload.get("event_sequence", 0)),
+            verified_at=str(payload.get("verified_at", _now())),
+            git_head=payload.get("git_head"),
+            diff_hash=payload.get("diff_hash"),
+            outcome=str(payload.get("outcome", "")),
+        )
+
+
 @dataclass
 class Telemetry:
     """Operational observations that are not part of engineering state."""
@@ -84,6 +120,8 @@ class Telemetry:
     #: Outcome of the most recent independent verification pass
     #: (PASS / PASS_WITH_UNVERIFIED / FAIL / INCONCLUSIVE).
     last_verification_outcome: str | None = None
+    #: Watermark of the most recent verification pass for staleness gating.
+    verification_snapshot: VerificationSnapshot | None = None
     #: Final run outcome once completion is gated through (or forced past) the
     #: verifier: completed / completed_with_unverified / completion_forced.
     outcome: str | None = None
@@ -101,6 +139,9 @@ class Telemetry:
             "context_budget": self.context_budget,
             "context_tokens": list(self.context_tokens),
             "last_verification_outcome": self.last_verification_outcome,
+            "verification_snapshot": (
+                self.verification_snapshot.to_dict() if self.verification_snapshot else None
+            ),
             "outcome": self.outcome,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
@@ -121,6 +162,11 @@ class Telemetry:
             context_budget=int(payload.get("context_budget", 4000)),
             context_tokens=list(payload.get("context_tokens", [])),
             last_verification_outcome=payload.get("last_verification_outcome"),
+            verification_snapshot=(
+                VerificationSnapshot.from_dict(payload["verification_snapshot"])
+                if payload.get("verification_snapshot")
+                else None
+            ),
             outcome=payload.get("outcome"),
             started_at=str(payload.get("started_at", _now())),
             completed_at=payload.get("completed_at"),
