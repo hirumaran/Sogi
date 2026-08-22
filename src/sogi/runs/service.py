@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import re
 import secrets
 import threading
 from collections.abc import Callable, Iterator
@@ -44,6 +45,10 @@ from .render import render_run_start, render_run_state
 
 class RunNotFoundError(KeyError):
     """Raised when a run_id does not exist in the store."""
+
+
+#: Test-shaped paths are handled by tampering checks, not scope checks.
+TEST_FILE_LIKE = re.compile(r"(^|/)tests?/|(^|/)test_[^/]*\.py$|[^/]*_test\.py$")
 
 
 class CompletionGateError(RuntimeError):
@@ -270,6 +275,74 @@ class RunService:
             self.db.save_run_with_events(fresh, events)
             self._clear_active_run(run_id)
         return self.get(run_id)
+
+    def assess_patch(self, run_id: str, *, base: str = "HEAD") -> dict[str, object]:
+        """Analyze the working-tree diff and raise governor findings for it.
+
+        Deterministic rules only: deleted/weakened tests become CRITICAL
+        test_tampering findings, dependency-manifest edits become HIGH
+        dependency_change findings, unexpected paths become HIGH
+        scope_expansion findings. All are auditable events.
+        """
+        from sogi.patch import analyze_patch
+
+        record = self.get(run_id)
+        expected: tuple[str, ...] = ()
+        if record.context is not None:
+            expected = tuple(record.context.related_files)
+            expected += tuple(record.context.related_tests)
+        assessment = analyze_patch(self.repo_root, base=base, expected_files=expected)
+
+        def mutate(rec: RunRecord, now: str) -> list[Event]:
+            rec.telemetry.patch_assessment = assessment.to_dict()
+            return [
+                Event(
+                    type="decision_recorded",
+                    run_id=run_id,
+                    timestamp=now,
+                    payload={"kind": "patch_assessment", "risk": assessment.risk},
+                )
+            ]
+
+        self._mutate(run_id, mutate)
+
+        for path in assessment.tests_deleted:
+            self.raise_warning(
+                run_id,
+                "test_tampering",
+                f"Test file deleted: {path}. Deleting tests to make a task pass "
+                "is never acceptable.",
+                subject=path,
+                severity="CRITICAL",
+            )
+        for path in assessment.tests_weakened:
+            self.raise_warning(
+                run_id,
+                "test_tampering",
+                f"Test weakened in {path}: assertions removed or skip/xfail added.",
+                subject=path,
+                severity="CRITICAL",
+            )
+        for manifest in assessment.dependency_changes:
+            self.raise_warning(
+                run_id,
+                "dependency_change",
+                f"Dependency manifest modified: {manifest}. New dependencies "
+                "require explicit approval.",
+                subject=manifest,
+                severity="HIGH",
+            )
+        for path in assessment.unexpected_files:
+            if TEST_FILE_LIKE.match(path):
+                continue  # test files get tampering checks, not scope noise
+            self.raise_warning(
+                run_id,
+                "scope_expansion",
+                f"{path} appears unrelated to the requested task.",
+                subject=path,
+                severity="HIGH",
+            )
+        return assessment.to_dict()
 
     def acknowledge(self, run_id: str, kind: str, subject: str) -> None:
         """Record an explicit policy decision to accept a governor finding.
@@ -502,18 +575,26 @@ class RunService:
         self._mutate(run_id, mutate)
 
     def raise_warning(
-        self, run_id: str, kind: str, message: str, *, subject: str | None = None
+        self,
+        run_id: str,
+        kind: str,
+        message: str,
+        *,
+        subject: str | None = None,
+        severity: str = "WARNING",
     ) -> None:
         def mutate(record: RunRecord, now: str) -> list[Event]:
             record.telemetry.warnings.append(
-                WarningRecord(kind=kind, message=message, timestamp=now, subject=subject)
+                WarningRecord(
+                    kind=kind, message=message, timestamp=now, subject=subject, severity=severity
+                )
             )
             return [
                 Event(
                     type="warning_raised",
                     run_id=run_id,
                     timestamp=now,
-                    payload={"kind": kind, "message": message},
+                    payload={"kind": kind, "message": message, "severity": severity},
                 )
             ]
 

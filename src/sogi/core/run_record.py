@@ -124,6 +124,8 @@ class Telemetry:
     last_verification_outcome: str | None = None
     #: Watermark of the most recent verification pass for staleness gating.
     verification_snapshot: VerificationSnapshot | None = None
+    #: Deterministic working-tree assessment captured by assess_patch().
+    patch_assessment: dict[str, Any] | None = None
     #: Final run outcome once completion is gated through (or forced past) the
     #: verifier: completed / completed_with_unverified / completion_forced.
     outcome: str | None = None
@@ -144,6 +146,7 @@ class Telemetry:
             "verification_snapshot": (
                 self.verification_snapshot.to_dict() if self.verification_snapshot else None
             ),
+            "patch_assessment": self.patch_assessment,
             "outcome": self.outcome,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
@@ -169,6 +172,7 @@ class Telemetry:
                 if payload.get("verification_snapshot")
                 else None
             ),
+            patch_assessment=payload.get("patch_assessment"),
             outcome=payload.get("outcome"),
             started_at=str(payload.get("started_at", _now())),
             completed_at=payload.get("completed_at"),

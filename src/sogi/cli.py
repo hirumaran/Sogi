@@ -122,6 +122,14 @@ def build_parser() -> argparse.ArgumentParser:
     hook.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
     hook.add_argument("--run", help="Attach the observation to an explicit run")
 
+    patch = subcommands.add_parser(
+        "patch", help="Assess the working-tree diff for a run (tampering, scope, risk)"
+    )
+    patch.add_argument("run_id")
+    patch.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
+    patch.add_argument("--base", default="HEAD", help="Base revision for the diff")
+    patch.add_argument("--format", choices=("text", "json"), default="text")
+
     mcp = subcommands.add_parser("mcp", help="Run the Sogi MCP server over stdio")
     mcp.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
     mcp.add_argument("--run", help="Attach the server to an existing run")
@@ -147,9 +155,38 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_agent(args)
     if args.command == "hook":
         return _cmd_hook(args)
+    if args.command == "patch":
+        return _cmd_patch(args)
     if args.command == "mcp":
         return _cmd_mcp(args)
     return 2
+
+
+def _cmd_patch(args: argparse.Namespace) -> int:
+    try:
+        with RunService(args.repo) as service:
+            assessment = service.assess_patch(args.run_id, base=args.base)
+            warnings = service.get(args.run_id).telemetry.warnings
+    except (RunNotFoundError, ValueError, RuntimeError) as exc:
+        print(f"sogi: {exc}", file=sys.stderr)
+        return 1
+    if args.format == "json":
+        print(json.dumps(assessment, indent=2, sort_keys=True))
+    else:
+        print(f"PATCH ASSESSMENT  risk={assessment['risk']}")
+        print(f"  Changed files: {len(assessment['changed_files'])}")
+        if assessment["unexpected_files"]:
+            print(f"  Unexpected: {', '.join(assessment['unexpected_files'])}")
+        if assessment["tests_deleted"]:
+            print(f"  Tests DELETED: {', '.join(assessment['tests_deleted'])}")
+        if assessment["tests_weakened"]:
+            print(f"  Tests weakened: {', '.join(assessment['tests_weakened'])}")
+        if assessment["dependency_changes"]:
+            print("  Dependency changes: " + ", ".join(assessment["dependency_changes"]))
+        tampering = [w for w in warnings if w.kind == "test_tampering"]
+        for warning in tampering:
+            print(f"  [TAMPERING] {warning.message}")
+    return 0
 
 
 def _cmd_hook(args: argparse.Namespace) -> int:
