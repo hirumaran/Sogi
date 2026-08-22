@@ -108,6 +108,7 @@ class RunService:
                     },
                 )
             )
+            self._write_active_run(run_id)
         if compile_context:
             try:
                 self.compile_context(run_id, budget=budget)
@@ -478,6 +479,38 @@ class RunService:
         if record is None:
             raise RunNotFoundError(run_id)
         return record
+
+    # -- active run ------------------------------------------------------------
+
+    def _write_active_run(self, run_id: str) -> None:
+        """Point observation hooks at this run (newest run wins)."""
+        self.sogi_dir.mkdir(parents=True, exist_ok=True)
+        (self.sogi_dir / "active_run").write_text(run_id + "\n", encoding="utf-8")
+
+    def active_run_id(self) -> str | None:
+        """Resolve the run observation events should attach to.
+
+        Prefers the explicitly recorded active run; falls back to the most
+        recently created run that is not DONE. Returns None when nothing is
+        in progress so hooks can no-op silently.
+        """
+        marker = self.sogi_dir / "active_run"
+        if marker.is_file():
+            try:
+                candidate = marker.read_text(encoding="utf-8").strip()
+            except OSError:
+                candidate = ""
+            if candidate:
+                try:
+                    record = self.get(candidate)
+                    if record.state.phase is not EngineeringPhase.DONE:
+                        return candidate
+                except RunNotFoundError:
+                    pass
+        for record in reversed(self.db.list_runs()):
+            if record.state.phase is not EngineeringPhase.DONE:
+                return record.run_id
+        return None
 
     def render(self, run_id: str) -> str:
         return render_run_state(self.get(run_id))

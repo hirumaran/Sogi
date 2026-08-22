@@ -94,6 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extra arguments passed through to the claude executable",
     )
 
+    hook = subcommands.add_parser(
+        "hook", help="Ingest one agent-host hook event from stdin (silent no-op on error)"
+    )
+    hook.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
+    hook.add_argument("--run", help="Attach the observation to an explicit run")
+
     mcp = subcommands.add_parser("mcp", help="Run the Sogi MCP server over stdio")
     mcp.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
     mcp.add_argument("--run", help="Attach the server to an existing run")
@@ -117,9 +123,36 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_metrics(args)
     if args.command == "agent":
         return _cmd_agent(args)
+    if args.command == "hook":
+        return _cmd_hook(args)
     if args.command == "mcp":
         return _cmd_mcp(args)
     return 2
+
+
+def _cmd_hook(args: argparse.Namespace) -> int:
+    """Ingest a host hook payload. Hooks must never disturb the agent, so
+    every failure mode exits 0 silently; only --debug surfaces problems."""
+    from sogi.integrations import hooks as hook_ingest
+
+    payload = hook_ingest.read_payload()
+    if payload is None:
+        return 0
+    observations = hook_ingest.map_hook_payload(payload)
+    if not observations:
+        return 0
+    try:
+        service = RunService(args.repo)  # analyzer loads lazily; not needed here
+        run_id = args.run or service.active_run_id()
+        if run_id:
+            hook_ingest.apply_to_service(service, observations, run_id)
+        service.close()
+    except Exception:
+        if getattr(args, "debug", False):
+            raise
+        # A supervision failure must never break the supervised agent.
+        pass
+    return 0
 
 
 def _cmd_context(args: argparse.Namespace) -> int:

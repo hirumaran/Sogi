@@ -29,7 +29,8 @@ def test_cli_agent_print_config(capsys, tmp_path: Path) -> None:
 
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert "sogi" in payload["mcpServers"]
+    assert "sogi" in payload["mcp_config"]["mcpServers"]
+    assert "PostToolUse" in payload["settings"]["hooks"]
     assert not (tmp_path / ".sogi").exists()  # nothing written in print mode
 
 
