@@ -122,9 +122,7 @@ def _command_lines(record: RunRecord) -> list[str]:
     lines: list[str] = []
     for item in record.telemetry.commands:
         status = (
-            "running"
-            if item.finished_at is None
-            else _command_status(item.success, item.exit_code)
+            "running" if item.finished_at is None else _command_status(item.success, item.exit_code)
         )
         lines.append(f"- {item.command} [{status}]")
         if item.result:

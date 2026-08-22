@@ -29,10 +29,13 @@ from sogi.core.run_record import (
 from sogi.core.task_spec import TaskSpec
 from sogi.events.event import Event
 from sogi.events.log import EventLog
+from sogi.governor import Governor
 from sogi.repository.provider import RepositoryProvider
 from sogi.repository.tree_sitter_provider import AnalyzerCommandError, TreeSitterProvider
 from sogi.state.engineering_state import EngineeringState
 from sogi.storage.db import SogiDatabase
+from sogi.verification.discovery import DiscoveredCheck
+from sogi.verification.verifier import VerificationReport, Verifier
 
 from .render import render_run_start, render_run_state
 
@@ -64,6 +67,7 @@ class RunService:
         self._provider = provider
         self._analyzer_command = analyzer_command
         self._lock = threading.Lock()
+        self.governor = Governor()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -213,9 +217,7 @@ class RunService:
         def mutate(record: RunRecord, now: str) -> list[Event]:
             record.state.files_examined.append(path)
             record.telemetry.files_read.append(path)
-            return [
-                Event(type="file_read", run_id=run_id, timestamp=now, payload={"path": path})
-            ]
+            return [Event(type="file_read", run_id=run_id, timestamp=now, payload={"path": path})]
 
         self._mutate(run_id, mutate)
 
@@ -238,9 +240,7 @@ class RunService:
 
     def command_started(self, run_id: str, command: str) -> None:
         def mutate(record: RunRecord, now: str) -> list[Event]:
-            record.telemetry.commands.append(
-                CommandRecord(command=command, started_at=now)
-            )
+            record.telemetry.commands.append(CommandRecord(command=command, started_at=now))
             return [
                 Event(
                     type="command_started",
@@ -264,6 +264,9 @@ class RunService:
         def mutate(record: RunRecord, now: str) -> list[Event]:
             # Match the earliest-started open instance (FIFO) so that when the
             # same command string runs twice, results are attributed in order.
+            # With no open instance (e.g. only the finish was reported), the
+            # completion is recorded standalone rather than dropped.
+            matched = False
             for item in record.telemetry.commands:
                 if item.command == command and item.finished_at is None:
                     record.telemetry.commands.remove(item)
@@ -277,7 +280,19 @@ class RunService:
                             success=success,
                         )
                     )
+                    matched = True
                     break
+            if not matched:
+                record.telemetry.commands.append(
+                    CommandRecord(
+                        command=command,
+                        started_at=now,
+                        finished_at=now,
+                        exit_code=exit_code,
+                        result=result,
+                        success=success,
+                    )
+                )
             return [
                 Event(
                     type="command_finished",
@@ -311,10 +326,12 @@ class RunService:
 
         self._mutate(run_id, mutate)
 
-    def raise_warning(self, run_id: str, kind: str, message: str) -> None:
+    def raise_warning(
+        self, run_id: str, kind: str, message: str, *, subject: str | None = None
+    ) -> None:
         def mutate(record: RunRecord, now: str) -> list[Event]:
             record.telemetry.warnings.append(
-                WarningRecord(kind=kind, message=message, timestamp=now)
+                WarningRecord(kind=kind, message=message, timestamp=now, subject=subject)
             )
             return [
                 Event(
@@ -391,6 +408,69 @@ class RunService:
 
         self._mutate(run_id, mutate)
 
+    def verify(
+        self,
+        run_id: str,
+        *,
+        timeout: float = 600.0,
+        checks: tuple[DiscoveredCheck, ...] | None = None,
+    ) -> VerificationReport:
+        """Independently verify the run and persist evidence to the record.
+
+        Runs the repository's own discovered checks, maps outcomes to
+        acceptance criteria, records executed checks as commands, and appends
+        one ``verification_result`` event per criterion.
+        """
+        record = self.get(run_id)
+        report = Verifier(self.repo_root, timeout=timeout).verify(record, checks=checks)
+
+        def mutate(rec: RunRecord, now: str) -> list[Event]:
+            events: list[Event] = [
+                Event(
+                    type="verification_started",
+                    run_id=run_id,
+                    timestamp=now,
+                    payload={"criterion": "*"},
+                )
+            ]
+            for result in report.checks:
+                rec.telemetry.commands.append(
+                    CommandRecord(
+                        command=result.check.command,
+                        started_at=now,
+                        finished_at=now,
+                        exit_code=result.exit_code,
+                        result=result.output_tail,
+                        success=result.success,
+                    )
+                )
+            for item in report.criteria:
+                rec.telemetry.verification.append(
+                    VerificationRecord(
+                        criterion=item.criterion,
+                        status=item.status,
+                        evidence=item.evidence,
+                        timestamp=now,
+                    )
+                )
+                rec.state.verification[item.criterion] = _status_to_bool(item.status)
+                events.append(
+                    Event(
+                        type="verification_result",
+                        run_id=run_id,
+                        timestamp=now,
+                        payload={
+                            "criterion": item.criterion,
+                            "status": item.status,
+                            "evidence": list(item.evidence),
+                        },
+                    )
+                )
+            return events
+
+        self._mutate(run_id, mutate)
+        return report
+
     # -- reads ---------------------------------------------------------------
 
     def get(self, run_id: str) -> RunRecord:
@@ -445,11 +525,48 @@ class RunService:
             record = self.get(run_id)
             now = _now()
             events = fn(record, now)
+            events.extend(self._govern(record, events, now))
             record.state.updated_at = now
             record.updated_at = now
             for event in events:
                 self.events.append(event)
             self.db.save_run(record)
+
+    def _govern(self, record: RunRecord, new_events: list[Event], now: str) -> list[Event]:
+        """Run deterministic checks and turn new findings into warnings.
+
+        Findings whose kind+subject already has a recorded warning are skipped,
+        so an ongoing loop produces one intervention rather than one per step.
+        """
+        stream = self.events.for_run(record.run_id) + new_events
+        findings = self.governor.inspect(record, stream)
+        warned = {
+            f"{warning.kind}:{warning.subject}"
+            for warning in record.telemetry.warnings
+            if warning.subject is not None
+        }
+        events: list[Event] = []
+        for finding in findings:
+            if finding.signature in warned:
+                continue
+            record.telemetry.warnings.append(
+                WarningRecord(
+                    kind=finding.kind,
+                    message=finding.message,
+                    timestamp=now,
+                    subject=finding.subject,
+                )
+            )
+            warned.add(finding.signature)
+            events.append(
+                Event(
+                    type="warning_raised",
+                    run_id=record.run_id,
+                    timestamp=now,
+                    payload={"kind": finding.kind, "message": finding.message},
+                )
+            )
+        return events
 
 
 def _status_to_bool(status: str) -> bool | None:

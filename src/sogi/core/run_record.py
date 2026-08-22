@@ -42,11 +42,17 @@ class CommandRecord:
 
 @dataclass(frozen=True)
 class WarningRecord:
-    """A Sogi intervention (governor check, failed context compile, ...)."""
+    """A Sogi intervention (governor check, failed context compile, ...).
+
+    ``subject`` identifies what the warning is about (a path, a command, ...)
+    so repeated deterministic checks can deduplicate: one intervention per
+    kind+subject unless the situation recurs after being addressed.
+    """
 
     kind: str
     message: str
     timestamp: str = field(default_factory=_now)
+    subject: str | None = None
 
 
 @dataclass(frozen=True)
@@ -100,9 +106,7 @@ class Telemetry:
             commands=[CommandRecord(**item) for item in payload.get("commands", [])],
             warnings=[WarningRecord(**item) for item in payload.get("warnings", [])],
             verification=[
-                VerificationRecord(
-                    **{**item, "evidence": tuple(item.get("evidence", ()))}
-                )
+                VerificationRecord(**{**item, "evidence": tuple(item.get("evidence", ()))})
                 for item in payload.get("verification", [])
             ],
             context_compilations=int(payload.get("context_compilations", 0)),

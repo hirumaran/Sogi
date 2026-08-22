@@ -214,9 +214,7 @@ def test_concurrent_mutations_across_instances_do_not_lose_updates(repo: Path) -
         service.record_decision(run_id, decision)
         service.close()
 
-    threads = [
-        threading.Thread(target=record, args=(f"decision-{index}",)) for index in range(5)
-    ]
+    threads = [threading.Thread(target=record, args=(f"decision-{index}",)) for index in range(5)]
     for thread in threads:
         thread.start()
     for thread in threads:

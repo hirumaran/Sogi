@@ -66,6 +66,52 @@ def test_record_decision_requires_active_run(facade: SogiMcp) -> None:
         facade.record_decision("Use middleware")
 
 
+def test_record_event_files_and_commands(facade: SogiMcp) -> None:
+    run_id = facade.understand_task("Fix auth", budget=1200)["run_id"]
+
+    facade.record_event("file_read", path="src/auth.py")
+    facade.record_event("file_modified", path="src/auth.py")
+    facade.record_event("command_finished", command="pytest tests/", exit_code=1, success=False)
+
+    state = facade.get_state(run_id=run_id)
+    assert state["telemetry"]["files_read"] == ["src/auth.py"]
+    assert state["telemetry"]["files_modified"] == ["src/auth.py"]
+    assert state["telemetry"]["commands"][0]["success"] is False
+
+
+def test_record_event_rejects_unknown_type(facade: SogiMcp) -> None:
+    facade.understand_task("Fix auth")
+    with pytest.raises(ValueError):
+        facade.record_event("file_deleted", path="src/auth.py")
+
+
+def test_check_scope_reports_warnings(facade: SogiMcp) -> None:
+    facade.understand_task("Fix expired refresh token redirect")
+
+    clean = facade.check_scope()
+    assert clean["clean"] is True
+
+    for _ in range(3):
+        facade.record_event("file_read", path="src/auth.py")
+
+    scoped = facade.check_scope()
+    assert scoped["clean"] is False
+    assert scoped["warnings"][0]["kind"] == "repeated_read"
+
+
+def test_verify_returns_report(facade: SogiMcp) -> None:
+    facade.understand_task(
+        "Fix auth",
+        acceptance_criteria=["Auth behavior works"],
+    )
+
+    report = facade.verify()
+
+    assert report["run_id"]
+    assert report["outcome"] in {"PASS", "PASS_WITH_UNVERIFIED", "FAIL", "INCONCLUSIVE"}
+    assert report["criteria"][0]["criterion"] == "Auth behavior works"
+
+
 def test_explicit_run_id_overrides_current(facade: SogiMcp) -> None:
     first = facade.understand_task("Fix auth")["run_id"]
     second = facade.understand_task("Add billing")["run_id"]
@@ -83,7 +129,7 @@ def test_unknown_run_id_raises(facade: SogiMcp) -> None:
 
 
 @pytest.mark.skipif(mcp is None, reason="mcp extra not installed")
-def test_stdio_server_registers_four_tools(repo: Path) -> None:
+def test_stdio_server_registers_all_tools(repo: Path) -> None:
     import asyncio
 
     from mcp import ClientSession, StdioServerParameters
@@ -100,4 +146,12 @@ def test_stdio_server_registers_four_tools(repo: Path) -> None:
             return sorted(tool.name for tool in tools.tools)
 
     names = asyncio.run(run())
-    assert names == ["get_context", "get_state", "record_decision", "understand_task"]
+    assert names == [
+        "check_scope",
+        "get_context",
+        "get_state",
+        "record_decision",
+        "record_event",
+        "understand_task",
+        "verify",
+    ]

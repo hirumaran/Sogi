@@ -2,7 +2,8 @@
 
 Sogi is a software-engineering control plane for coding agents. It sits beside an
 existing agent, selects the smallest useful repository context, preserves compact
-engineering state, and will eventually govern scope and independently verify work.
+engineering state, governs scope deterministically, and independently verifies
+that finished work actually satisfies its requirements.
 
 Sogi is not another coding agent and it does not fork its repository-intelligence
 backend. Tree-sitter Analyzer is consumed behind a replaceable `RepositoryProvider`
@@ -10,14 +11,23 @@ boundary.
 
 ## Current milestone
 
-Sogi now persists complete engineering sessions as **runs**:
+Sogi now covers the full control-plane loop:
 
 - a `RunRecord` binds `TaskSpec`, `EngineeringState`, compiled context, and telemetry;
 - every observable event is appended to an append-only event log (the source of truth);
 - runs persist to SQLite (`.sogi/sogi.db`) with a human-readable JSON snapshot per run;
-- `sogi run start/show/events/list` and `sogi context --run` drive the lifecycle;
-- an MCP server exposes `understand_task`, `get_context`, `get_state`, and
-  `record_decision` so a coding agent can use Sogi as an external control plane.
+- the deterministic **Engineering Governor** watches the event stream for repeated
+  exploration, failure loops, and scope expansion, raising one targeted warning per
+  pattern (deduplicated by kind+subject);
+- the **independent verifier** discovers the repository's own declared checks
+  (pytest/ruff/mypy, npm scripts, Makefile targets, cargo), executes them, and maps
+  evidence to each acceptance criterion as SATISFIED / VIOLATED / UNVERIFIED — it
+  never equates "tests passed" with "every requirement proven";
+- **run metrics** quantify exploration, interventions, context use, verification,
+  and duration, providing the measurement base for controlled agent comparisons;
+- an MCP server exposes seven tools (`understand_task`, `get_context`, `get_state`,
+  `record_decision`, `record_event`, `check_scope`, `verify`);
+- `sogi agent claude` launches Claude Code already wired to Sogi's MCP server.
 
 ## Quick start
 
@@ -81,11 +91,20 @@ persists across restarts under the repository root:
 
 ### Use Sogi from Claude Code (MCP)
 
+The quickest path is the built-in launcher, which generates the MCP config and
+starts Claude Code with Sogi already attached:
+
+```bash
+sogi agent claude --repo .
+```
+
+To register Sogi manually, run the server:
+
 ```bash
 sogi mcp --repo .
 ```
 
-Register it in Claude Code's MCP configuration:
+and add it to Claude Code's MCP configuration:
 
 ```json
 {
@@ -98,14 +117,65 @@ Register it in Claude Code's MCP configuration:
 }
 ```
 
-An agent can then call the four tools in sequence:
+An agent can then call the tools in sequence:
 
 ```text
 1. understand_task("Fix expired refresh-token redirect", ...)
 2. get_context()
 3. investigate / edit
-4. record_decision("Handle expiration in refresh middleware ...")
-5. get_state()
+4. record_event("file_read", path="src/auth/refresh.py")
+5. record_decision("Handle expiration in refresh middleware ...")
+6. check_scope()      # any governor warnings?
+7. verify()           # independent evidence against acceptance criteria
+```
+
+### Supervision and verification
+
+While an agent works, Sogi watches deterministically:
+
+```bash
+sogi run show 7d3f21   # warnings appear in telemetry as they are raised
+```
+
+When the agent claims completion, verify independently:
+
+```bash
+sogi verify 7d3f21     # runs discovered checks, maps evidence to criteria
+```
+
+```text
+VERIFICATION FAIL_WITH... example:
+
+VERIFICATION PASS_WITH_UNVERIFIED
+Run: 7d3f21
+
+CHECKS
+  [x] pytest: pytest (exit 0)
+  [x] ruff: ruff check . (exit 0)
+
+ACCEPTANCE CRITERIA
+  [x] SATISFIED: Expired refresh tokens redirect to /login
+        evidence: tests/test_refresh.py
+  [?] UNVERIFIED: Valid-session behavior remains unchanged
+        note: Relevant test exists but was not executed.
+```
+
+### Metrics
+
+```bash
+sogi metrics 7d3f21
+```
+
+```text
+METRICS run 7d3f21  phase=DONE
+
+  Files read: 5 (unique 2, repeat 3)
+  Files modified: 1  Commands: 4 (failed 1)
+  Sogi interventions: 2
+    repeated_read: 1
+    scope_expansion: 1
+  Context: 1 compilations, last 243/1200 tokens
+  Verification: 1 satisfied, 0 violated, 1 unverified
 ```
 
 ## Design boundary
@@ -130,11 +200,18 @@ events (append-only)
    ↓
 RunRecord state
    ↓
+Governor (deterministic checks)
+   ↓
+Verifier (independent evidence)
+   ↓
+Metrics (measurement)
+   ↓
 RunService (lifecycle)
    ↓
-CLI + MCP
+CLI + MCP + agent launchers
 ```
 
-The next milestone is to add deterministic governor checks (repeated-read,
-repeated-failure, scope-expansion) and an independent verification command.
+The next milestone is a controlled evaluation: the same model and agent, with
+and without Sogi, on identical repository tasks — measuring success, token use,
+interventions, and regressions before claiming any improvement.
 See [docs/roadmap.md](docs/roadmap.md).

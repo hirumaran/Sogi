@@ -1,11 +1,14 @@
 """Sogi MCP server.
 
-Exposes exactly four operations to a coding agent:
+Exposes the control plane to a coding agent:
 
 - ``understand_task``  start a run and understand the task
 - ``get_context``      return the run's compiled repository context
 - ``get_state``        return the run's full engineering state
 - ``record_decision``  record a decision in the run
+- ``record_event``     record an observation (reads, edits, commands)
+- ``check_scope``      return governor warnings and scope status
+- ``verify``           run independent verification
 
 The tool logic lives in :class:`SogiMcp`, which is testable without the ``mcp``
 SDK. The FastMCP wiring is a thin adapter over it and is imported lazily so the
@@ -72,6 +75,59 @@ class SogiMcp:
         self.service.record_decision(rid, decision)
         return {"run_id": rid, "recorded": True, "decision": decision}
 
+    def record_event(
+        self,
+        event_type: str,
+        *,
+        path: str | None = None,
+        command: str | None = None,
+        exit_code: int | None = None,
+        success: bool | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Record an observation (file read/modified, command execution).
+
+        Governor checks run automatically against the appended event.
+        """
+        rid = self._resolve_run(run_id)
+        if event_type == "file_read" and path:
+            self.service.record_file_read(rid, path)
+        elif event_type == "file_modified" and path:
+            self.service.record_file_modified(rid, path)
+        elif event_type == "command_started" and command:
+            self.service.command_started(rid, command)
+        elif event_type == "command_finished" and command:
+            self.service.command_finished(rid, command, exit_code=exit_code, success=success)
+        else:
+            raise ValueError(
+                f"Unsupported observation: type={event_type!r} "
+                "(need file_read, file_modified, command_started, or "
+                "command_finished with matching path/command)"
+            )
+        return {"run_id": rid, "recorded": True, "type": event_type}
+
+    def check_scope(self, run_id: str | None = None) -> dict[str, Any]:
+        """Return current governor warnings and modified-file scope status."""
+        rid = self._resolve_run(run_id)
+        record = self.service.get(rid)
+        warnings = [
+            {"kind": warning.kind, "message": warning.message}
+            for warning in record.telemetry.warnings
+        ]
+        return {
+            "run_id": rid,
+            "phase": record.state.phase.value,
+            "files_modified": list(record.telemetry.files_modified),
+            "warnings": warnings,
+            "clean": not warnings,
+        }
+
+    def verify(self, run_id: str | None = None) -> dict[str, Any]:
+        """Run independent verification and return the report."""
+        rid = self._resolve_run(run_id)
+        report = self.service.verify(rid)
+        return report.to_dict()
+
     def _resolve_run(self, run_id: str | None) -> str:
         rid = run_id or self.current_run_id
         if rid is None:
@@ -104,8 +160,7 @@ def build_server(service: RunService, *, run_id: str | None = None) -> Any:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:  # pragma: no cover - exercised via CLI
         raise ImportError(
-            "The Sogi MCP server requires the 'mcp' extra: "
-            "install with `pip install 'sogi[mcp]'`"
+            "The Sogi MCP server requires the 'mcp' extra: install with `pip install 'sogi[mcp]'`"
         ) from exc
 
     mcp = FastMCP("sogi")
@@ -157,6 +212,63 @@ def build_server(service: RunService, *, run_id: str | None = None) -> Any:
             run_id: Optional run id. Defaults to the current run.
         """
         return facade.record_decision(decision, run_id)
+
+    @mcp.tool()
+    def record_event(
+        event_type: str,
+        path: str | None = None,
+        command: str | None = None,
+        exit_code: int | None = None,
+        success: bool | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Record an observation so Sogi can supervise the work.
+
+        Governor checks (repeated reads, failure loops, scope expansion) run
+        automatically against every recorded observation.
+
+        Args:
+            event_type: One of file_read, file_modified, command_started,
+                command_finished.
+            path: File path, for file_read / file_modified.
+            command: Command string, for command_started / command_finished.
+            exit_code: Exit code, for command_finished.
+            success: Whether the command succeeded, for command_finished.
+            run_id: Optional run id. Defaults to the current run.
+        """
+        return facade.record_event(
+            event_type,
+            path=path,
+            command=command,
+            exit_code=exit_code,
+            success=success,
+            run_id=run_id,
+        )
+
+    @mcp.tool()
+    def check_scope(run_id: str | None = None) -> dict[str, Any]:
+        """Return the current governor warnings and scope status for the run.
+
+        Call this before declaring work complete to see whether Sogi detected
+        repeated exploration, failure loops, or out-of-scope modifications.
+
+        Args:
+            run_id: Optional run id. Defaults to the current run.
+        """
+        return facade.check_scope(run_id)
+
+    @mcp.tool()
+    def verify(run_id: str | None = None) -> dict[str, Any]:
+        """Run independent verification of the current run.
+
+        Executes the repository's own discovered checks (tests, lint,
+        typecheck) and maps evidence to each acceptance criterion as
+        SATISFIED, VIOLATED, or UNVERIFIED.
+
+        Args:
+            run_id: Optional run id. Defaults to the current run.
+        """
+        return facade.verify(run_id)
 
     return mcp
 

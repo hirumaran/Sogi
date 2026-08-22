@@ -63,6 +63,37 @@ def build_parser() -> argparse.ArgumentParser:
     list_runs.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
     list_runs.add_argument("--format", choices=("text", "json"), default="text")
 
+    verify = subcommands.add_parser("verify", help="Independently verify a run's work")
+    verify.add_argument("run_id")
+    verify.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
+    verify.add_argument("--timeout", type=float, default=600.0, help="Per-check timeout (s)")
+    verify.add_argument("--format", choices=("text", "json"), default="text")
+
+    metrics = subcommands.add_parser("metrics", help="Show a run's efficiency metrics")
+    metrics.add_argument("run_id")
+    metrics.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
+    metrics.add_argument("--format", choices=("text", "json"), default="text")
+
+    agent = subcommands.add_parser("agent", help="Launch a coding agent supervised by Sogi")
+    agent_sub = agent.add_subparsers(dest="agent_command", required=True)
+
+    claude = agent_sub.add_parser("claude", help="Launch Claude Code with Sogi's MCP server")
+    claude.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
+    claude.add_argument(
+        "--analyzer-command",
+        help="Analyzer executable path (or set SOGI_TSA_COMMAND for a command string)",
+    )
+    claude.add_argument(
+        "--print-config",
+        action="store_true",
+        help="Print the generated MCP config and exit without launching",
+    )
+    claude.add_argument(
+        "args",
+        nargs=argparse.REMAINDER,
+        help="Extra arguments passed through to the claude executable",
+    )
+
     mcp = subcommands.add_parser("mcp", help="Run the Sogi MCP server over stdio")
     mcp.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
     mcp.add_argument("--run", help="Attach the server to an existing run")
@@ -80,6 +111,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_context(args)
     if args.command == "run":
         return _cmd_run(args)
+    if args.command == "verify":
+        return _cmd_verify(args)
+    if args.command == "metrics":
+        return _cmd_metrics(args)
+    if args.command == "agent":
+        return _cmd_agent(args)
     if args.command == "mcp":
         return _cmd_mcp(args)
     return 2
@@ -200,6 +237,56 @@ def _cmd_run_list(args: argparse.Namespace) -> int:
             )
         print("\n".join(lines))
     return 0
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    service = None
+    try:
+        service = RunService(args.repo)
+        report = service.verify(args.run_id, timeout=args.timeout)
+    except (RunNotFoundError, ValueError) as exc:
+        print(f"sogi: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if service is not None:
+            service.close()
+    if args.format == "json":
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(report.render())
+    return 0 if report.outcome.startswith("PASS") else 1
+
+
+def _cmd_metrics(args: argparse.Namespace) -> int:
+    from sogi.telemetry.metrics import RunMetrics
+
+    try:
+        service = RunService(args.repo)
+        record = service.get(args.run_id)
+    except (RunNotFoundError, ValueError) as exc:
+        print(f"sogi: {exc}", file=sys.stderr)
+        return 1
+    metrics = RunMetrics.from_record(record)
+    if args.format == "json":
+        print(json.dumps(metrics.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(metrics.render())
+    return 0
+
+
+def _cmd_agent(args: argparse.Namespace) -> int:
+    from sogi.integrations.agent.claude import launch
+
+    repo = args.repo.expanduser().resolve()
+    if not repo.is_dir():
+        print(f"sogi: Repository does not exist: {repo}", file=sys.stderr)
+        return 1
+    return launch(
+        repo,
+        args.args,
+        analyzer_command=_analyzer_command(args),
+        print_config=args.print_config,
+    )
 
 
 def _cmd_mcp(args: argparse.Namespace) -> int:

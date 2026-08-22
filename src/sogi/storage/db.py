@@ -16,6 +16,7 @@ import json
 import sqlite3
 import tempfile
 import threading
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,18 @@ class SogiDatabase:
         self.snapshots_dir = self.sogi_dir / "runs"
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.Lock()
+        # Close the connection when this instance is garbage-collected even if
+        # close() was never called, so short-lived services do not leak handles.
+        self._finalizer = weakref.finalize(self, type(self)._close_conn, weakref.ref(self))
+
+    @staticmethod
+    def _close_conn(ref: weakref.ReferenceType[SogiDatabase]) -> None:
+        target = ref()
+        if target is not None:
+            with target._lock:
+                if target._conn is not None:
+                    target._conn.close()
+                    target._conn = None
 
     def _connect(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -66,6 +79,7 @@ class SogiDatabase:
             if self._conn is not None:
                 self._conn.close()
                 self._conn = None
+        self._finalizer.detach()
 
     # -- runs ----------------------------------------------------------------
 
@@ -85,9 +99,7 @@ class SogiDatabase:
     def load_run(self, run_id: str) -> RunRecord | None:
         with self._lock:
             conn = self._connect()
-            row = conn.execute(
-                "SELECT payload FROM runs WHERE run_id = ?", (run_id,)
-            ).fetchone()
+            row = conn.execute("SELECT payload FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         if row is None:
             return None
         return RunRecord.from_dict(json.loads(row["payload"]))
