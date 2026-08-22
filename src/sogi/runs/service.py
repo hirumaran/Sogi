@@ -445,6 +445,15 @@ class RunService:
                 "Verification is stale: the repository worktree changed after the last verify.",
                 remediation="Re-run `sogi verify <run_id>` to refresh the evidence.",
             )
+        if (
+            snapshot.git_head is not None
+            and current.git_head is not None
+            and current.git_head != snapshot.git_head
+        ):
+            raise CompletionGateError(
+                "Verification is stale: the repository HEAD moved after the last verify.",
+                remediation="Re-run `sogi verify <run_id>` to refresh the evidence.",
+            )
 
     def _clear_active_run(self, run_id: str) -> None:
         marker = self.sogi_dir / "active_run"

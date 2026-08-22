@@ -155,11 +155,7 @@ def _porcelain(root: Path) -> list[str]:
         return []
     if completed.returncode != 0:
         return []
-    return [
-        line[3:].strip().strip('"')
-        for line in completed.stdout.splitlines()
-        if line.strip()
-    ]
+    return [line[3:].strip().strip('"') for line in completed.stdout.splitlines() if line.strip()]
 
 
 def capture_worktree(root: Path, session_id: str) -> bool:
@@ -204,9 +200,7 @@ def note_health(root: Path, *, received: int = 0, dropped: int = 0, parse_failed
         data = {}
     data["hook_events_received"] = int(data.get("hook_events_received", 0)) + received
     data["hook_events_dropped"] = int(data.get("hook_events_dropped", 0)) + dropped
-    data["payload_parse_failures"] = (
-        int(data.get("payload_parse_failures", 0)) + parse_failed
-    )
+    data["payload_parse_failures"] = int(data.get("payload_parse_failures", 0)) + parse_failed
     data["last_hook_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -226,7 +220,9 @@ def read_health(root: Path) -> dict[str, Any]:
 # -- end-to-end hook handling ------------------------------------------------------
 
 
-def process_payload(repo_root: Path, payload: dict[str, Any], run_id: str, session_id: str | None) -> int:
+def process_payload(
+    repo_root: Path, payload: dict[str, Any], run_id: str, session_id: str | None
+) -> int:
     """Full pipeline for one hook event; returns count of recorded events."""
     event_name = payload.get("hook_event_name")
     tool = str(payload.get("tool_name", ""))

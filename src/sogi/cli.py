@@ -122,9 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hook.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
     hook.add_argument("--run", help="Attach the observation to an explicit run")
-    hook.add_argument(
-        "--session", help="Session id binding observations to one agent session"
-    )
+    hook.add_argument("--session", help="Session id binding observations to one agent session")
     hook.add_argument("--debug", action="store_true", help="Surface hook errors")
 
     patch = subcommands.add_parser(

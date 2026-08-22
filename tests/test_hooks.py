@@ -142,3 +142,109 @@ def test_hooks_settings_shape(tmp_path: Path) -> None:
     assert "Bash" in entry["matcher"]  # type: ignore[index]
     command = entry["hooks"][0]["command"]  # type: ignore[index]
     assert "-m sogi hook --repo" in command  # type: ignore[index]
+
+
+# -- worktree reconciliation (trustworthy observation) ---------------------------
+
+
+def _git(repo: Path, *args: str) -> str:
+    import subprocess
+
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+    )
+    return completed.stdout
+
+
+@pytest.fixture()
+def git_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "grepo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("x = 1\n")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    return repo
+
+
+def test_bash_caused_file_change_is_reconciled(git_repo: Path, capsys) -> None:
+    """A file changed via Bash must be observed even though no Edit tool ran."""
+    service = RunService(git_repo)
+    run_id = service.start("Fix auth", compile_context=False).run_id
+    session = "sess001"
+
+    # PreToolUse for a mutation-capable tool captures the clean state.
+    pre_payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": session,
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo x >> src/hidden.py"},
+    }
+    hook_ingest.process_payload(git_repo, pre_payload, run_id, session)
+
+    # The command actually mutates the tree outside any Edit tool.
+    (git_repo / "src" / "hidden.py").write_text("y = 2\n")
+
+    post_payload = {
+        "hook_event_name": "PostToolUse",
+        "session_id": session,
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo x >> src/hidden.py"},
+        "tool_response": {"exit_code": 0},
+    }
+    recorded = hook_ingest.process_payload(git_repo, post_payload, run_id, session)
+
+    assert recorded >= 1
+    record = service.get(run_id)
+    assert "src/hidden.py" in record.telemetry.files_modified
+
+
+def test_session_snapshots_are_isolated(git_repo: Path) -> None:
+    service = RunService(git_repo)
+    service.start("Fix auth", compile_context=False)
+
+    hook_ingest.capture_worktree(git_repo, "s1")
+    hook_ingest.capture_worktree(git_repo, "s2")
+    (git_repo / "src" / "app.py").write_text("x = 2\n")
+
+    assert hook_ingest.reconcile_worktree(git_repo, "s1") == ["src/app.py"]
+    assert hook_ingest.reconcile_worktree(git_repo, "s2") == ["src/app.py"]
+    # snapshots consumed exactly once
+    assert hook_ingest.reconcile_worktree(git_repo, "s1") == []
+
+
+def test_health_counters_track_flow(tmp_path: Path) -> None:
+    hook_ingest.note_health(tmp_path, received=3)
+    hook_ingest.note_health(tmp_path, dropped=1, parse_failed=1)
+
+    health = hook_ingest.read_health(tmp_path)
+
+    assert health["observed"] is True
+    assert health["hook_events_received"] == 3
+    assert health["hook_events_dropped"] == 1
+    assert health["payload_parse_failures"] == 1
+    assert "last_hook_at" in health
+
+
+def test_check_scope_surfaces_observation_health(repo: Path) -> None:
+    from sogi.mcp.server import SogiMcp
+
+    facade = SogiMcp(RunService(repo, provider=FakeProvider(repo)))
+    facade.understand_task("Fix auth")
+    hook_ingest.note_health(repo, received=5, dropped=2)
+
+    scope = facade.check_scope()
+
+    assert scope["observation_health"]["observed"] is True
+    assert scope["observation_health"]["hook_events_dropped"] == 2
+
+
+def test_launcher_settings_include_pre_and_post_hooks(tmp_path: Path) -> None:
+    settings = build_hooks_settings(tmp_path, session_id="fixed-session")
+    hooks = settings["hooks"]
+    assert set(hooks.keys()) == {"PreToolUse", "PostToolUse"}  # type: ignore[union-attr]
+    command = hooks["PostToolUse"][0]["hooks"][0]["command"]  # type: ignore[index]
+    assert "--session fixed-session" in command  # type: ignore[index]

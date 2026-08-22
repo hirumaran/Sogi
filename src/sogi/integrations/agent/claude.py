@@ -50,22 +50,45 @@ def build_hooks_settings(
     repo_root: Path,
     *,
     python: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, object]:
     """Return a Claude Code settings document with Sogi observation hooks.
 
     The hook command ingests each PostToolUse event into the active run and
-    never fails loudly: a supervision problem must not break the agent.
+    never fails loudly: a supervision problem must not break the agent. A
+    session id binds observations to this launch so concurrent sessions in
+    the same repository do not cross-contaminate runs.
     """
+    import shlex
+    import uuid
+
     executable = python or sys.executable
-    command = f"{executable} -m sogi hook --repo {repo_root}"
+    sid = session_id or uuid.uuid4().hex[:12]
+    command_parts = [
+        executable,
+        "-m",
+        "sogi",
+        "hook",
+        "--repo",
+        str(repo_root),
+        "--session",
+        sid,
+    ]
+    command = shlex.join(command_parts)
     return {
         "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": _OBSERVED_TOOLS,
+                    "hooks": [{"type": "command", "command": command}],
+                }
+            ],
             "PostToolUse": [
                 {
                     "matcher": _OBSERVED_TOOLS,
                     "hooks": [{"type": "command", "command": command}],
                 }
-            ]
+            ],
         }
     }
 
