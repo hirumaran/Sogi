@@ -216,6 +216,43 @@ def test_session_snapshots_are_isolated(git_repo: Path) -> None:
     assert hook_ingest.reconcile_worktree(git_repo, "s1") == []
 
 
+def test_reconciliation_detects_second_edit_to_already_dirty_file(git_repo: Path) -> None:
+    path = git_repo / "src" / "app.py"
+    path.write_text("x = 2\n")
+    hook_ingest.capture_worktree(git_repo, "dirty-session")
+
+    path.write_text("x = 3\n")
+
+    assert hook_ingest.reconcile_worktree(git_repo, "dirty-session") == ["src/app.py"]
+
+
+def test_reconciliation_detects_deleted_file(git_repo: Path) -> None:
+    hook_ingest.capture_worktree(git_repo, "delete-session")
+
+    (git_repo / "src" / "app.py").unlink()
+
+    assert hook_ingest.reconcile_worktree(git_repo, "delete-session") == ["src/app.py"]
+
+
+def test_reconciliation_ignores_unchanged_dirty_file(git_repo: Path) -> None:
+    path = git_repo / "src" / "app.py"
+    path.write_text("x = 2\n")
+    hook_ingest.capture_worktree(git_repo, "unchanged-session")
+
+    assert hook_ingest.reconcile_worktree(git_repo, "unchanged-session") == []
+
+
+def test_session_id_cannot_escape_hook_state_directory(git_repo: Path) -> None:
+    hostile = "../../outside/session"
+
+    hook_ingest.capture_worktree(git_repo, hostile)
+
+    state_dir = git_repo / ".sogi" / hook_ingest.STATE_DIR
+    assert len(list(state_dir.glob("*.json"))) == 1
+    assert not (git_repo.parent / "outside" / "session.json").exists()
+    assert hook_ingest.reconcile_worktree(git_repo, hostile) == []
+
+
 def test_health_counters_track_flow(tmp_path: Path) -> None:
     hook_ingest.note_health(tmp_path, received=3)
     hook_ingest.note_health(tmp_path, dropped=1, parse_failed=1)

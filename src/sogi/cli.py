@@ -165,6 +165,11 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run.add_argument("--repeats", type=int, default=1)
     eval_run.add_argument("--mock", action="store_true", help="Dry-run without an agent")
     eval_run.add_argument("--out", type=Path, required=True, help="JSONL output path")
+    eval_run.add_argument(
+        "--artifacts",
+        type=Path,
+        help="Preserve each trial's agent output and tracked Git patch",
+    )
     eval_run.add_argument("--sogi-repo", type=Path, help="Repo whose runs grade the sogi arm")
 
     eval_compare = eval_sub.add_parser("compare", help="Compare two JSONL result files")
@@ -228,14 +233,20 @@ def _cmd_eval(args: argparse.Namespace) -> int:
         else:
             print("sogi: eval run needs --runner or --mock", file=sys.stderr)
             return 1
-        results = run_suite(
-            tasks,
-            arm=ExperimentArm(args.arm),
-            runner=runner,
-            agent_label=args.agent,
-            sogi_repo=args.sogi_repo,
-            repeats=max(1, args.repeats),
-        )
+        try:
+            results = run_suite(
+                tasks,
+                arm=ExperimentArm(args.arm),
+                runner=runner,
+                agent_label=args.agent,
+                sogi_repo=args.sogi_repo,
+                repeats=max(1, args.repeats),
+                isolate=not args.mock,
+                artifacts_dir=args.artifacts,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"sogi: {exc}", file=sys.stderr)
+            return 1
         args.out.parent.mkdir(parents=True, exist_ok=True)
         with open(args.out, "a", encoding="utf-8") as handle:
             for result in results:

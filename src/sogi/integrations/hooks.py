@@ -14,6 +14,7 @@ whatever actually changed on disk is recorded, independent of agent reports.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -163,17 +164,24 @@ def _porcelain(root: Path) -> list[str]:
 
 
 def capture_worktree(root: Path, session_id: str) -> bool:
-    """Store the pre-tool worktree listing for later reconciliation."""
-    state_dir = root / ".sogi" / STATE_DIR
-    state_dir.mkdir(parents=True, exist_ok=True)
-    snapshot = {"captured_at": time.time(), "files": _porcelain(root)}
-    (state_dir / f"{session_id}.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    """Store content fingerprints for every currently dirty path.
+
+    Clean files need no pre-hash: if a tool changes one it appears in the
+    post-tool porcelain set. Dirty files do need content hashes so a second
+    edit remains observable even though their Git status entry is unchanged.
+    """
+    paths = _porcelain(root)
+    snapshot = {
+        "captured_at": time.time(),
+        "files": {path: _path_signature(root / path) for path in paths},
+    }
+    _session_state_path(root, session_id).write_text(json.dumps(snapshot), encoding="utf-8")
     return True
 
 
 def reconcile_worktree(root: Path, session_id: str) -> list[str]:
-    """Return files changed since capture_worktree, then clear the snapshot."""
-    snapshot_path = root / ".sogi" / STATE_DIR / f"{session_id}.json"
+    """Return paths whose status or content changed, then consume the snapshot."""
+    snapshot_path = _session_state_path(root, session_id, create=False)
     if not snapshot_path.is_file():
         return []
     try:
@@ -181,13 +189,47 @@ def reconcile_worktree(root: Path, session_id: str) -> list[str]:
     except (OSError, json.JSONDecodeError):
         snapshot_path.unlink(missing_ok=True)
         return []
-    before = set(snapshot.get("files", []))
-    after = set(_porcelain(root))
+    raw_before = snapshot.get("files", {})
+    if isinstance(raw_before, dict):
+        before = {str(path): str(signature) for path, signature in raw_before.items()}
+    else:
+        # Backward compatibility with the original list-only snapshot. A
+        # legacy entry is conservatively treated as changed once.
+        before = {str(path): "<legacy-dirty>" for path in raw_before}
+    after = {path: _path_signature(root / path) for path in _porcelain(root)}
     snapshot_path.unlink(missing_ok=True)
-    changed = sorted(after - before)
-    # Paths that disappeared entirely from status were committed or reset;
-    # report only additions/modifications we can attribute.
-    return [path for path in changed if (root / path).exists()]
+    return sorted(
+        path
+        for path in before.keys() | after.keys()
+        if path not in before or path not in after or before[path] != after[path]
+    )
+
+
+def _session_state_path(root: Path, session_id: str, *, create: bool = True) -> Path:
+    """Map an untrusted host session id to a safe, deterministic filename."""
+    state_dir = root / ".sogi" / STATE_DIR
+    if create:
+        state_dir.mkdir(parents=True, exist_ok=True)
+    safe_id = hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()[:24]
+    return state_dir / f"{safe_id}.json"
+
+
+def _path_signature(path: Path) -> str:
+    """Content-sensitive signature including deletion and symlink states."""
+    try:
+        if path.is_symlink():
+            return f"symlink:{path.readlink()}"
+        if not path.exists():
+            return "missing"
+        if not path.is_file():
+            return "non-file"
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+        return f"file:{digest.hexdigest()}"
+    except (OSError, ValueError):
+        return "unreadable"
 
 
 # -- observation health ------------------------------------------------------------
