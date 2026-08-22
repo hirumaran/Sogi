@@ -37,9 +37,7 @@ def test_write_tools_map_to_file_modified() -> None:
 
 
 def test_bash_maps_to_command_finished_with_exit_code() -> None:
-    mapped = hook_ingest.map_hook_payload(
-        payload("Bash", {"command": "pytest"}, {"exit_code": 1})
-    )
+    mapped = hook_ingest.map_hook_payload(payload("Bash", {"command": "pytest"}, {"exit_code": 1}))
     assert mapped == [
         {"type": "command_finished", "command": "pytest", "exit_code": 1, "success": False}
     ]
@@ -100,7 +98,7 @@ def test_active_run_falls_back_to_newest_open_run(repo: Path) -> None:
 
     assert service.active_run_id() == run_id
 
-    service.complete(run_id)  # gated in later milestone; fine here pre-gate
+    service.complete(run_id, force=True)
     assert service.active_run_id() is None
 
 

@@ -172,15 +172,74 @@ def test_record_verification_maps_to_state(service: RunService) -> None:
     )
 
 
-def test_complete_is_terminal_from_any_phase(service: RunService) -> None:
+def test_complete_requires_verification_evidence(service: RunService) -> None:
     run_id = service.start("Fix auth", compile_context=False).run_id
 
-    record = service.complete(run_id)
+    from sogi.runs.service import CompletionGateError
+
+    with pytest.raises(CompletionGateError) as excinfo:
+        service.complete(run_id)
+    assert "No independent verification has run" in str(excinfo.value)
+
+
+def test_complete_blocked_by_failed_verification(repo: Path) -> None:
+    from fakes import FakeProvider as _FP  # noqa: F401
+
+    from sogi.runs.service import CompletionGateError
+    from sogi.verification.discovery import DiscoveredCheck
+
+    service = RunService(repo)
+    run_id = service.start("Fix auth", compile_context=False).run_id
+
+    failing = DiscoveredCheck(name="t", command="exit 1", kind="test")
+    report = service.verify(run_id, checks=(failing,))
+    # An objectively failing repository check is FAIL, not INCONCLUSIVE,
+    # even when no acceptance criteria exist to map evidence onto.
+    assert report.outcome == "FAIL"
+    assert service.get(run_id).telemetry.last_verification_outcome == "FAIL"
+
+    with pytest.raises(CompletionGateError):
+        service.complete(run_id)
+
+
+def test_complete_is_terminal_from_any_phase_with_force(service: RunService) -> None:
+    run_id = service.start("Fix auth", compile_context=False).run_id
+
+    record = service.complete(run_id, force=True)
 
     assert record.state.phase == EngineeringPhase.DONE
     assert record.telemetry.completed_at is not None
+    assert record.telemetry.outcome == "completion_forced"
+    kinds = [warning.kind for warning in record.telemetry.warnings]
+    assert "completion_forced" in kinds
     types = [event.type for event in service.events.for_run(run_id)]
-    assert types == ["task_created", "phase_changed", "run_completed"]
+    assert types == ["task_created", "warning_raised", "phase_changed", "run_completed"]
+
+
+def test_complete_passes_gate_after_successful_verification(service: RunService) -> None:
+    from sogi.verification.discovery import DiscoveredCheck
+
+    run_id = service.start(
+        "Fix auth",
+        acceptance_criteria=("Auth behavior works",),
+        compile_context=False,
+    ).run_id
+
+    # No verification yet: gated.
+    from sogi.runs.service import CompletionGateError
+
+    with pytest.raises(CompletionGateError):
+        service.complete(run_id)
+
+    passing = DiscoveredCheck(name="t", command="exit 0", kind="test")
+    service.verify(run_id, checks=(passing,))
+
+    # Context was never compiled, so the criterion maps as unverified; the
+    # explicit policy decision accepts it.
+    record = service.complete(run_id, allow_unverified=True)
+    assert record.state.phase == EngineeringPhase.DONE
+    assert record.telemetry.outcome == "completed_with_unverified"
+    assert service.active_run_id() is None
 
 
 def test_persistence_across_service_instances(repo: Path) -> None:

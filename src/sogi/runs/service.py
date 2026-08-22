@@ -44,6 +44,20 @@ class RunNotFoundError(KeyError):
     """Raised when a run_id does not exist in the store."""
 
 
+class CompletionGateError(RuntimeError):
+    """Raised when completion is attempted without sufficient evidence.
+
+    Sogi's core promise is that an unsupported "done" claim is rejected.
+    Every rejection carries the reason so a coding agent can act on it
+    (run verification, fix failures, or acknowledge unverified criteria).
+    """
+
+    def __init__(self, reason: str, *, remediation: str) -> None:
+        super().__init__(f"{reason} {remediation}")
+        self.reason = reason
+        self.remediation = remediation
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -95,18 +109,20 @@ class RunService:
         telemetry = Telemetry(context_budget=budget)
         record = RunRecord(run_id=run_id, task=task, state=state, telemetry=telemetry)
         with self._file_lock():
-            self.db.save_run(record)
-            self.events.append(
-                Event(
-                    type="task_created",
-                    run_id=run_id,
-                    payload={
-                        "objective": task.objective,
-                        "acceptance_criteria": list(task.acceptance_criteria),
-                        "constraints": list(task.constraints),
-                        "budget": budget,
-                    },
-                )
+            self.db.save_run_with_events(
+                record,
+                [
+                    Event(
+                        type="task_created",
+                        run_id=run_id,
+                        payload={
+                            "objective": task.objective,
+                            "acceptance_criteria": list(task.acceptance_criteria),
+                            "constraints": list(task.constraints),
+                            "budget": budget,
+                        },
+                    )
+                ],
             )
             self._write_active_run(run_id)
         if compile_context:
@@ -173,30 +189,111 @@ class RunService:
         self._mutate(run_id, mutate)
         return self.get(run_id).context  # type: ignore[return-value]
 
-    def complete(self, run_id: str) -> RunRecord:
-        """Mark a run complete. Completion is terminal and reachable from any phase."""
+    def complete(
+        self,
+        run_id: str,
+        *,
+        allow_unverified: bool = False,
+        force: bool = False,
+    ) -> RunRecord:
+        """Gate completion through independent verification evidence.
 
-        def mutate(record: RunRecord, now: str) -> list[Event]:
+        Rules:
+        - a verification pass must have run (otherwise the agent's "done"
+          claim is unsupported and rejected);
+        - FAIL or INCONCLUSIVE outcomes block completion;
+        - PASS_WITH_UNVERIFIED requires an explicit ``allow_unverified``
+          policy decision;
+        - ``force`` overrides any rejection but records a visible
+          intervention, so bypasses are never silent.
+        """
+
+        def mutate(rec: RunRecord, now: str) -> list[Event]:
             events: list[Event] = []
-            if record.state.phase != EngineeringPhase.DONE:
+            outcome = rec.telemetry.outcome
+
+            if not force:
+                self._check_gate(rec, allow_unverified)
+                if rec.telemetry.last_verification_outcome == "PASS":
+                    outcome = "completed"
+                else:
+                    outcome = "completed_with_unverified"
+            else:
+                outcome = "completion_forced"
+                rec.telemetry.warnings.append(
+                    WarningRecord(
+                        kind="completion_forced",
+                        message=(
+                            "Completion forced without satisfying the verification "
+                            f"gate (last outcome: {rec.telemetry.last_verification_outcome})."
+                        ),
+                        timestamp=now,
+                        subject=run_id,
+                    )
+                )
+                events.append(
+                    Event(
+                        type="warning_raised",
+                        run_id=run_id,
+                        timestamp=now,
+                        payload={
+                            "kind": "completion_forced",
+                            "message": "Completion gate bypassed with force=True.",
+                        },
+                    )
+                )
+
+            if rec.state.phase != EngineeringPhase.DONE:
                 events.append(
                     Event(
                         type="phase_changed",
                         run_id=run_id,
                         timestamp=now,
-                        payload={
-                            "from": record.state.phase.value,
-                            "to": EngineeringPhase.DONE.value,
-                        },
+                        payload={"from": rec.state.phase.value, "to": EngineeringPhase.DONE.value},
                     )
                 )
-                record.state.phase = EngineeringPhase.DONE
-            record.telemetry.completed_at = now
+                rec.state.phase = EngineeringPhase.DONE
+            rec.telemetry.outcome = outcome
+            rec.telemetry.completed_at = now
             events.append(Event(type="run_completed", run_id=run_id, timestamp=now))
             return events
 
-        self._mutate(run_id, mutate)
+        with self._file_lock():
+            fresh = self.get(run_id)
+            now = _now()
+            events = mutate(fresh, now)
+            events.extend(self._govern(fresh, events, now))
+            fresh.state.updated_at = now
+            fresh.updated_at = now
+            self.db.save_run_with_events(fresh, events)
+            self._clear_active_run(run_id)
         return self.get(run_id)
+
+    def _check_gate(self, record: RunRecord, allow_unverified: bool) -> None:
+        outcome = record.telemetry.last_verification_outcome
+        if outcome is None:
+            raise CompletionGateError(
+                "No independent verification has run for this task.",
+                remediation="Run `sogi verify <run_id>` (or the verify tool) before completing.",
+            )
+        if outcome in {"FAIL", "INCONCLUSIVE"}:
+            raise CompletionGateError(
+                f"Verification outcome is {outcome}.",
+                remediation="Fix the failing checks or violated criteria, then verify again.",
+            )
+        if outcome == "PASS_WITH_UNVERIFIED" and not allow_unverified:
+            raise CompletionGateError(
+                "Verification passed but some acceptance criteria remain unverified.",
+                remediation=(
+                    "Add evidence for those criteria and re-verify, or accept them "
+                    "explicitly with allow_unverified=True."
+                ),
+            )
+
+    def _clear_active_run(self, run_id: str) -> None:
+        marker = self.sogi_dir / "active_run"
+        if marker.is_file() and marker.read_text(encoding="utf-8").strip() == run_id:
+            marker.unlink(missing_ok=True)
 
     # -- observations --------------------------------------------------------
 
@@ -426,6 +523,7 @@ class RunService:
         report = Verifier(self.repo_root, timeout=timeout).verify(record, checks=checks)
 
         def mutate(rec: RunRecord, now: str) -> list[Event]:
+            rec.telemetry.last_verification_outcome = report.outcome
             events: list[Event] = [
                 Event(
                     type="verification_started",
@@ -521,6 +619,12 @@ class RunService:
     def close(self) -> None:
         self.db.close()
 
+    def __enter__(self) -> RunService:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
     # -- internals -----------------------------------------------------------
 
     def _provider_for(self) -> RepositoryProvider:
@@ -561,9 +665,9 @@ class RunService:
             events.extend(self._govern(record, events, now))
             record.state.updated_at = now
             record.updated_at = now
-            for event in events:
-                self.events.append(event)
-            self.db.save_run(record)
+            # Projection + events commit in one transaction: a crash cannot
+            # leave the event stream and the run snapshot inconsistent.
+            self.db.save_run_with_events(record, events)
 
     def _govern(self, record: RunRecord, new_events: list[Event], now: str) -> list[Event]:
         """Run deterministic checks and turn new findings into warnings.

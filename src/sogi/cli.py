@@ -63,6 +63,20 @@ def build_parser() -> argparse.ArgumentParser:
     list_runs.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
     list_runs.add_argument("--format", choices=("text", "json"), default="text")
 
+    complete = run_sub.add_parser("complete", help="Complete a run through the verification gate")
+    complete.add_argument("run_id")
+    complete.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
+    complete.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="Accept unverified acceptance criteria explicitly",
+    )
+    complete.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass the gate (records a visible completion_forced intervention)",
+    )
+
     verify = subcommands.add_parser("verify", help="Independently verify a run's work")
     verify.add_argument("run_id")
     verify.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
@@ -142,11 +156,10 @@ def _cmd_hook(args: argparse.Namespace) -> int:
     if not observations:
         return 0
     try:
-        service = RunService(args.repo)  # analyzer loads lazily; not needed here
-        run_id = args.run or service.active_run_id()
-        if run_id:
-            hook_ingest.apply_to_service(service, observations, run_id)
-        service.close()
+        with RunService(args.repo) as service:  # analyzer loads lazily; not needed here
+            run_id = args.run or service.active_run_id()
+            if run_id:
+                hook_ingest.apply_to_service(service, observations, run_id)
     except Exception:
         if getattr(args, "debug", False):
             raise
@@ -158,10 +171,10 @@ def _cmd_hook(args: argparse.Namespace) -> int:
 def _cmd_context(args: argparse.Namespace) -> int:
     if args.run:
         try:
-            service = RunService(args.repo, analyzer_command=_analyzer_command(args))
-            compiled = service.compile_context(
-                args.run, budget=args.budget, prepare=not args.no_index
-            )
+            with RunService(args.repo, analyzer_command=_analyzer_command(args)) as service:
+                compiled = service.compile_context(
+                    args.run, budget=args.budget, prepare=not args.no_index
+                )
         except (RunNotFoundError, AnalyzerCommandError, OSError, ValueError) as exc:
             print(f"sogi: {exc}", file=sys.stderr)
             return 1
@@ -198,48 +211,68 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return _cmd_run_events(args)
     if args.run_command == "list":
         return _cmd_run_list(args)
+    if args.run_command == "complete":
+        return _cmd_run_complete(args)
     return 2
+
+
+def _cmd_run_complete(args: argparse.Namespace) -> int:
+    from sogi.runs.service import CompletionGateError
+
+    try:
+        with RunService(args.repo) as service:
+            record = service.complete(
+                args.run_id, allow_unverified=args.allow_unverified, force=args.force
+            )
+    except (RunNotFoundError, CompletionGateError, ValueError) as exc:
+        print(f"sogi: {exc}", file=sys.stderr)
+        return 1
+    outcome = record.telemetry.outcome or "completed"
+    print(f"Run {record.run_id} complete ({outcome}).")
+    return 0
 
 
 def _cmd_run_start(args: argparse.Namespace) -> int:
     try:
-        service = RunService(args.repo, analyzer_command=_analyzer_command(args))
-        record = service.start(
-            args.objective,
-            acceptance_criteria=tuple(args.criterion),
-            constraints=tuple(args.constraint),
-            budget=args.budget,
-            compile_context=not args.no_context,
-        )
+        with RunService(args.repo, analyzer_command=_analyzer_command(args)) as service:
+            record = service.start(
+                args.objective,
+                acceptance_criteria=tuple(args.criterion),
+                constraints=tuple(args.constraint),
+                budget=args.budget,
+                compile_context=not args.no_context,
+            )
+            rendered = service.render_start(record.run_id)
     except (AnalyzerCommandError, OSError, ValueError) as exc:
         print(f"sogi: {exc}", file=sys.stderr)
         return 1
     if args.format == "json":
         print(json.dumps(record.to_dict(), indent=2, sort_keys=True))
     else:
-        print(service.render_start(record.run_id))
+        print(rendered)
     return 0
 
 
 def _cmd_run_show(args: argparse.Namespace) -> int:
     try:
-        service = RunService(args.repo)
-        record = service.get(args.run_id)
+        with RunService(args.repo) as service:
+            record = service.get(args.run_id)
+            rendered = service.render(record.run_id)
     except (RunNotFoundError, ValueError) as exc:
         print(f"sogi: {exc}", file=sys.stderr)
         return 1
     if args.format == "json":
         print(json.dumps(record.to_dict(), indent=2, sort_keys=True))
     else:
-        print(service.render(args.run_id))
+        print(rendered)
     return 0
 
 
 def _cmd_run_events(args: argparse.Namespace) -> int:
     try:
-        service = RunService(args.repo)
-        service.get(args.run_id)  # raises RunNotFoundError for unknown runs
-        events = service.events.for_run(args.run_id)
+        with RunService(args.repo) as service:
+            service.get(args.run_id)  # raises RunNotFoundError for unknown runs
+            events = service.events.for_run(args.run_id)
     except (RunNotFoundError, ValueError) as exc:
         print(f"sogi: {exc}", file=sys.stderr)
         return 1
@@ -252,8 +285,8 @@ def _cmd_run_events(args: argparse.Namespace) -> int:
 
 def _cmd_run_list(args: argparse.Namespace) -> int:
     try:
-        service = RunService(args.repo)
-        records = service.db.list_runs()
+        with RunService(args.repo) as service:
+            records = service.db.list_runs()
     except ValueError as exc:
         print(f"sogi: {exc}", file=sys.stderr)
         return 1
@@ -273,16 +306,12 @@ def _cmd_run_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
-    service = None
     try:
-        service = RunService(args.repo)
-        report = service.verify(args.run_id, timeout=args.timeout)
+        with RunService(args.repo) as service:
+            report = service.verify(args.run_id, timeout=args.timeout)
     except (RunNotFoundError, ValueError) as exc:
         print(f"sogi: {exc}", file=sys.stderr)
         return 1
-    finally:
-        if service is not None:
-            service.close()
     if args.format == "json":
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
     else:
@@ -294,8 +323,8 @@ def _cmd_metrics(args: argparse.Namespace) -> int:
     from sogi.telemetry.metrics import RunMetrics
 
     try:
-        service = RunService(args.repo)
-        record = service.get(args.run_id)
+        with RunService(args.repo) as service:
+            record = service.get(args.run_id)
     except (RunNotFoundError, ValueError) as exc:
         print(f"sogi: {exc}", file=sys.stderr)
         return 1

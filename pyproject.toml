@@ -37,6 +37,9 @@ packages = ["src/sogi"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+filterwarnings = [
+  "error::ResourceWarning",
+]
 
 [tool.ruff]
 line-length = 100

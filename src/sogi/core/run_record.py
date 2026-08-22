@@ -81,6 +81,12 @@ class Telemetry:
     context_compilations: int = 0
     context_budget: int = 4000
     context_tokens: list[int] = field(default_factory=list)
+    #: Outcome of the most recent independent verification pass
+    #: (PASS / PASS_WITH_UNVERIFIED / FAIL / INCONCLUSIVE).
+    last_verification_outcome: str | None = None
+    #: Final run outcome once completion is gated through (or forced past) the
+    #: verifier: completed / completed_with_unverified / completion_forced.
+    outcome: str | None = None
     started_at: str = field(default_factory=_now)
     completed_at: str | None = None
 
@@ -94,6 +100,8 @@ class Telemetry:
             "context_compilations": self.context_compilations,
             "context_budget": self.context_budget,
             "context_tokens": list(self.context_tokens),
+            "last_verification_outcome": self.last_verification_outcome,
+            "outcome": self.outcome,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
         }
@@ -112,6 +120,8 @@ class Telemetry:
             context_compilations=int(payload.get("context_compilations", 0)),
             context_budget=int(payload.get("context_budget", 4000)),
             context_tokens=list(payload.get("context_tokens", [])),
+            last_verification_outcome=payload.get("last_verification_outcome"),
+            outcome=payload.get("outcome"),
             started_at=str(payload.get("started_at", _now())),
             completed_at=payload.get("completed_at"),
         )

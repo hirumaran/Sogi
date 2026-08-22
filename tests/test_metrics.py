@@ -17,6 +17,8 @@ def repo(tmp_path: Path) -> Path:
 
 
 def _exercise_run(repo: Path) -> str:
+    from sogi.verification.discovery import DiscoveredCheck
+
     service = RunService(repo)
     run = service.start("Fix auth", acceptance_criteria=("Auth works",))
     rid = run.run_id
@@ -29,7 +31,9 @@ def _exercise_run(repo: Path) -> str:
     service.command_started(rid, "mypy")
     service.command_finished(rid, "mypy", exit_code=1, success=False)
     service.raise_warning(rid, "scope_expansion", "billing touched")
-    service.complete(rid)
+    passing = DiscoveredCheck(name="t", command="exit 0", kind="test")
+    service.verify(rid, checks=(passing,))
+    service.complete(rid, allow_unverified=True)
     service.close()
     return rid
 
@@ -44,7 +48,8 @@ def test_metrics_counts_are_accurate(repo: Path) -> None:
     assert metrics.unique_files_read == 2
     assert metrics.repeat_reads == 3
     assert metrics.files_modified == 1
-    assert metrics.commands_executed == 2
+    # Verification commands count as executed commands: they ran on the host.
+    assert metrics.commands_executed == 3
     assert metrics.failed_commands == 1
     assert metrics.warnings == {"scope_expansion": 1, "repeated_read": 1}
     assert metrics.interventions == 2
