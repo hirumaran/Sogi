@@ -86,9 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     ack.add_argument("subject", help="Finding subject, e.g. the unrelated file path")
     ack.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
 
-    rebuild = run_sub.add_parser(
-        "rebuild", help="Reconstruct a run purely from its event stream"
-    )
+    rebuild = run_sub.add_parser("rebuild", help="Reconstruct a run purely from its event stream")
     rebuild.add_argument("run_id")
     rebuild.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
     rebuild.add_argument("--format", choices=("text", "json"), default="text")

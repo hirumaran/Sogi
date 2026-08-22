@@ -114,7 +114,9 @@ def reduce_event(record: RunRecord | None, event: Event) -> RunRecord:
 
     elif kind == "context_compiled":
         record.telemetry.context_compilations += 1
-        record.telemetry.context_budget = int(payload.get("budget", record.telemetry.context_budget))
+        record.telemetry.context_budget = int(
+            payload.get("budget", record.telemetry.context_budget)
+        )
         record.telemetry.context_tokens.append(int(payload.get("selected_tokens", 0)))
 
     elif kind == "phase_changed":
@@ -215,7 +217,11 @@ def compare_with_snapshot(replayed: RunRecord, stored: RunRecord) -> dict[str, l
         "state.failed_approaches", replayed.state.failed_approaches, stored.state.failed_approaches
     )
     check("state.files_modified", replayed.state.files_modified, stored.state.files_modified)
-    check("state.acknowledged.keys", sorted(replayed.state.acknowledged), sorted(stored.state.acknowledged))
+    check(
+        "state.acknowledged.keys",
+        sorted(replayed.state.acknowledged),
+        sorted(stored.state.acknowledged),
+    )
     check("telemetry.files_read", replayed.telemetry.files_read, stored.telemetry.files_read)
     check(
         "telemetry.files_modified",

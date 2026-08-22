@@ -7,8 +7,8 @@ from fakes import FakeProvider
 
 from sogi.cli import main
 from sogi.events.replay import compare_with_snapshot, replay
-from sogi.verification.discovery import DiscoveredCheck
 from sogi.runs.service import RunService
+from sogi.verification.discovery import DiscoveredCheck
 
 
 @pytest.fixture()
@@ -45,9 +45,9 @@ def test_replay_reproduces_state_from_events(repo: Path) -> None:
     rebuilt = replay(events)
 
     stored = service.get(run_id)
-    assert rebuilt.state.phase == stored.state.phase == __import__(
-        "sogi.core.phases", fromlist=["EngineeringPhase"]
-    ).EngineeringPhase.DONE
+    # Flow never completed, so both projections sit at INVESTIGATE.
+    assert rebuilt.state.phase == stored.state.phase
+    assert rebuilt.state.phase.value == "investigate"
     assert rebuilt.state.decisions == ["Handle expiration in middleware"]
     assert rebuilt.state.failed_approaches == ["Patching validate_token directly"]
     assert rebuilt.state.files_modified == ["src/auth.py"]
