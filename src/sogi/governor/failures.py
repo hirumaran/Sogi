@@ -11,7 +11,7 @@ from collections import Counter
 
 from sogi.events.event import Event
 
-from .finding import Finding
+from .finding import KIND_SEVERITY, Finding
 
 
 def check_failure_loops(events: list[Event], *, threshold: int = 3) -> list[Finding]:
@@ -46,6 +46,7 @@ def check_failure_loops(events: list[Event], *, threshold: int = 3) -> list[Find
                             "meaningful implementation change. Reconsider the "
                             "current hypothesis."
                         ),
+                        severity=KIND_SEVERITY["failure_loop"],
                     )
                 )
     return findings

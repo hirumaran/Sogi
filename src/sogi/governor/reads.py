@@ -11,7 +11,7 @@ from collections import Counter
 
 from sogi.events.event import Event
 
-from .finding import Finding
+from .finding import KIND_SEVERITY, Finding
 
 
 def check_repeated_reads(events: list[Event], *, threshold: int = 3) -> list[Finding]:
@@ -40,6 +40,7 @@ def check_repeated_reads(events: list[Event], *, threshold: int = 3) -> list[Fin
                             f"{path} has been read {threshold} times without "
                             "meaningful new evidence."
                         ),
+                        severity=KIND_SEVERITY["repeated_read"],
                     )
                 )
     return findings

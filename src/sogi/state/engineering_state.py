@@ -24,6 +24,10 @@ class EngineeringState:
     failed_approaches: list[str] = field(default_factory=list)
     verification: dict[str, bool | None] = field(default_factory=dict)
     unresolved: list[str] = field(default_factory=list)
+    #: Governor findings acknowledged by a human or agent policy decision,
+    #: keyed by "kind:subject" with the acknowledgement timestamp. Required
+    #: before completion when the finding is HIGH/CRITICAL severity.
+    acknowledged: dict[str, str] = field(default_factory=dict)
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
 

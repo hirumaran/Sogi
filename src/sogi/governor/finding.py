@@ -10,6 +10,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+INFO = "INFO"
+WARNING = "WARNING"
+HIGH = "HIGH"
+CRITICAL = "CRITICAL"
+SEVERITIES = (INFO, WARNING, HIGH, CRITICAL)
+
+#: Default completion-policy weight per finding kind. Scope expansion is HIGH:
+#: unrelated modifications block completion until explicitly acknowledged.
+KIND_SEVERITY: dict[str, str] = {
+    "repeated_read": WARNING,
+    "failure_loop": WARNING,
+    "scope_expansion": HIGH,
+    "test_tampering": CRITICAL,
+    "dependency_change": HIGH,
+    "completion_forced": CRITICAL,
+}
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -18,6 +35,7 @@ class Finding:
     kind: str
     subject: str
     message: str
+    severity: str = WARNING
 
     @property
     def signature(self) -> str:

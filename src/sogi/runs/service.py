@@ -271,6 +271,30 @@ class RunService:
             self._clear_active_run(run_id)
         return self.get(run_id)
 
+    def acknowledge(self, run_id: str, kind: str, subject: str) -> None:
+        """Record an explicit policy decision to accept a governor finding.
+
+        HIGH and CRITICAL findings block completion until acknowledged here;
+        the acknowledgement is itself an auditable event.
+        """
+
+        def mutate(record: RunRecord, now: str) -> list[Event]:
+            record.state.acknowledged[f"{kind}:{subject}"] = now
+            return [
+                Event(
+                    type="decision_recorded",
+                    run_id=run_id,
+                    timestamp=now,
+                    payload={
+                        "kind": "acknowledge",
+                        "warning_kind": kind,
+                        "subject": subject,
+                    },
+                )
+            ]
+
+        self._mutate(run_id, mutate)
+
     def _check_gate(self, record: RunRecord, allow_unverified: bool) -> None:
         outcome = record.telemetry.last_verification_outcome
         if outcome is None:
@@ -279,6 +303,7 @@ class RunService:
                 remediation="Run `sogi verify <run_id>` (or the verify tool) before completing.",
             )
         self._check_stale(record)
+        self._check_unresolved_findings(record)
         if outcome in {"FAIL", "INCONCLUSIVE"}:
             raise CompletionGateError(
                 f"Verification outcome is {outcome}.",
@@ -292,6 +317,25 @@ class RunService:
                     "explicitly with allow_unverified=True."
                 ),
             )
+
+    def _check_unresolved_findings(self, record: RunRecord) -> None:
+        """Block completion on unacknowledged HIGH/CRITICAL findings."""
+        blocking = [
+            warning
+            for warning in record.telemetry.warnings
+            if warning.severity in {"HIGH", "CRITICAL"}
+            and f"{warning.kind}:{warning.subject}" not in record.state.acknowledged
+        ]
+        if not blocking:
+            return
+        listed = "; ".join(f"{w.kind}({w.subject})" for w in blocking[:3])
+        raise CompletionGateError(
+            f"Unresolved high-severity finding(s): {listed}.",
+            remediation=(
+                "Resolve the underlying issue, or accept it explicitly via "
+                "`sogi acknowledge` / service.acknowledge()."
+            ),
+        )
 
     def _check_stale(self, record: RunRecord) -> None:
         """Reject evidence that predates later repository changes.
@@ -733,6 +777,7 @@ class RunService:
                     message=finding.message,
                     timestamp=now,
                     subject=finding.subject,
+                    severity=finding.severity,
                 )
             )
             warned.add(finding.signature)
@@ -741,7 +786,11 @@ class RunService:
                     type="warning_raised",
                     run_id=record.run_id,
                     timestamp=now,
-                    payload={"kind": finding.kind, "message": finding.message},
+                    payload={
+                        "kind": finding.kind,
+                        "message": finding.message,
+                        "severity": finding.severity,
+                    },
                 )
             )
         return events

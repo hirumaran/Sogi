@@ -46,13 +46,15 @@ class WarningRecord:
 
     ``subject`` identifies what the warning is about (a path, a command, ...)
     so repeated deterministic checks can deduplicate: one intervention per
-    kind+subject unless the situation recurs after being addressed.
+    kind+subject unless the situation recurs after being addressed. Severity
+    follows the governor's scale: INFO / WARNING / HIGH / CRITICAL.
     """
 
     kind: str
     message: str
     timestamp: str = field(default_factory=_now)
     subject: str | None = None
+    severity: str = "WARNING"
 
 
 @dataclass(frozen=True)

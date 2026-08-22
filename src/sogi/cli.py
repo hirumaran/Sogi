@@ -77,6 +77,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bypass the gate (records a visible completion_forced intervention)",
     )
 
+    ack = run_sub.add_parser(
+        "acknowledge", help="Accept a high-severity governor finding (auditable)"
+    )
+    ack.add_argument("run_id")
+    ack.add_argument("kind", help="Finding kind, e.g. scope_expansion")
+    ack.add_argument("subject", help="Finding subject, e.g. the unrelated file path")
+    ack.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
+
     verify = subcommands.add_parser("verify", help="Independently verify a run's work")
     verify.add_argument("run_id")
     verify.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository root")
@@ -213,7 +221,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return _cmd_run_list(args)
     if args.run_command == "complete":
         return _cmd_run_complete(args)
+    if args.run_command == "acknowledge":
+        return _cmd_run_acknowledge(args)
     return 2
+
+
+def _cmd_run_acknowledge(args: argparse.Namespace) -> int:
+    try:
+        with RunService(args.repo) as service:
+            service.acknowledge(args.run_id, args.kind, args.subject)
+    except (RunNotFoundError, ValueError) as exc:
+        print(f"sogi: {exc}", file=sys.stderr)
+        return 1
+    print(f"Acknowledged {args.kind}:{args.subject} for run {args.run_id}.")
+    return 0
 
 
 def _cmd_run_complete(args: argparse.Namespace) -> int:

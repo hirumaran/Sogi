@@ -16,7 +16,7 @@ from posixpath import dirname
 from sogi.core.run_record import RunRecord
 from sogi.events.event import Event
 
-from .finding import Finding
+from .finding import KIND_SEVERITY, Finding
 
 
 def _ancestors(path: str) -> set[str]:
@@ -63,6 +63,7 @@ def check_scope_expansion(record: RunRecord, events: list[Event]) -> list[Findin
                 kind="scope_expansion",
                 subject=path,
                 message=f"{path} appears unrelated to the requested task.",
+                severity=KIND_SEVERITY["scope_expansion"],
             )
         )
     return findings
