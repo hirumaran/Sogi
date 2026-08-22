@@ -152,6 +152,7 @@ def test_stdio_server_registers_all_tools(repo: Path) -> None:
         "get_state",
         "record_decision",
         "record_event",
+        "record_usage",
         "understand_task",
         "verify",
     ]

@@ -126,6 +126,16 @@ class Telemetry:
     verification_snapshot: VerificationSnapshot | None = None
     #: Deterministic working-tree assessment captured by assess_patch().
     patch_assessment: dict[str, Any] | None = None
+    #: Host/model-reported usage. These are measurements with provenance:
+    #: values are only present when a host or model API actually reported
+    #: them; Sogi never estimates silently.
+    agent_host: str | None = None
+    agent_version: str | None = None
+    model: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    cost_usd: float | None = None
     #: Final run outcome once completion is gated through (or forced past) the
     #: verifier: completed / completed_with_unverified / completion_forced.
     outcome: str | None = None
@@ -147,6 +157,13 @@ class Telemetry:
                 self.verification_snapshot.to_dict() if self.verification_snapshot else None
             ),
             "patch_assessment": self.patch_assessment,
+            "agent_host": self.agent_host,
+            "agent_version": self.agent_version,
+            "model": self.model,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cached_tokens": self.cached_tokens,
+            "cost_usd": self.cost_usd,
             "outcome": self.outcome,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
@@ -173,6 +190,13 @@ class Telemetry:
                 else None
             ),
             patch_assessment=payload.get("patch_assessment"),
+            agent_host=payload.get("agent_host"),
+            agent_version=payload.get("agent_version"),
+            model=payload.get("model"),
+            input_tokens=int(payload.get("input_tokens", 0)),
+            output_tokens=int(payload.get("output_tokens", 0)),
+            cached_tokens=int(payload.get("cached_tokens", 0)),
+            cost_usd=payload.get("cost_usd"),
             outcome=payload.get("outcome"),
             started_at=str(payload.get("started_at", _now())),
             completed_at=payload.get("completed_at"),

@@ -9,6 +9,7 @@ Exposes the control plane to a coding agent:
 - ``record_event``     record an observation (reads, edits, commands)
 - ``check_scope``      return governor warnings and scope status
 - ``verify``           run independent verification
+- ``record_usage``     report host/model-measured token usage and cost
 
 The tool logic lives in :class:`SogiMcp`, which is testable without the ``mcp``
 SDK. The FastMCP wiring is a thin adapter over it and is imported lazily so the
@@ -131,6 +132,30 @@ class SogiMcp:
         rid = self._resolve_run(run_id)
         report = self.service.verify(rid)
         return report.to_dict()
+
+    def record_usage(
+        self,
+        *,
+        agent_host: str | None = None,
+        model: str | None = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cached_tokens: int = 0,
+        cost_usd: float | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Record host/model-reported token usage and cost for the run."""
+        rid = self._resolve_run(run_id)
+        self.service.record_usage(
+            rid,
+            agent_host=agent_host,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
+            cost_usd=cost_usd,
+        )
+        return {"run_id": rid, "recorded": True}
 
     def _resolve_run(self, run_id: str | None) -> str:
         rid = run_id or self.current_run_id
@@ -273,6 +298,36 @@ def build_server(service: RunService, *, run_id: str | None = None) -> Any:
             run_id: Optional run id. Defaults to the current run.
         """
         return facade.verify(run_id)
+
+    @mcp.tool()
+    def record_usage(
+        model: str | None = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cached_tokens: int = 0,
+        cost_usd: float | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Report token usage and cost actually consumed by the agent.
+
+        Values must come from the host or model API — never estimates.
+
+        Args:
+            model: Model identifier that produced the tokens.
+            input_tokens: Input tokens reported for this step.
+            output_tokens: Output tokens reported for this step.
+            cached_tokens: Cached (discounted) input tokens.
+            cost_usd: Reported cost in USD for this step.
+            run_id: Optional run id. Defaults to the current run.
+        """
+        return facade.record_usage(
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
+            cost_usd=cost_usd,
+            run_id=run_id,
+        )
 
     return mcp
 

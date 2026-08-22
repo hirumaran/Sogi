@@ -75,6 +75,7 @@ def test_event_types_cover_the_lifecycle() -> None:
         "warning_raised",
         "verification_started",
         "verification_result",
+        "usage_recorded",
         "run_completed",
     }
     assert expected == EVENT_TYPES

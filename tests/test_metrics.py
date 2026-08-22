@@ -85,3 +85,32 @@ def test_cli_metrics_json(capsys: pytest.CaptureFixture[str], repo: Path) -> Non
 def test_cli_metrics_unknown_run(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code = main(["metrics", "missing", "--repo", str(repo)])
     assert code == 1
+
+
+def test_usage_metrics_recorded_and_reported(repo: Path) -> None:
+    service = RunService(repo)
+    rid = service.start("Fix auth", compile_context=False).run_id
+    service.record_usage(
+        rid,
+        agent_host="claude-code",
+        model="test-model",
+        input_tokens=1500,
+        output_tokens=300,
+        cached_tokens=200,
+        cost_usd=0.012,
+    )
+    service.record_usage(rid, input_tokens=500, output_tokens=100, cost_usd=0.004)
+    service.close()
+
+    service = RunService(repo)
+    metrics = RunMetrics.from_record(service.get(rid))
+
+    usage = metrics.usage
+    assert usage["provenance"] == "host-reported"
+    assert usage["input_tokens"] == 2000  # accumulates across calls
+    assert usage["output_tokens"] == 400
+    assert usage["model"] == "test-model"
+    assert abs(usage["cost_usd"] - 0.016) < 1e-9
+
+    text = metrics.render()
+    assert "in=2000" in text

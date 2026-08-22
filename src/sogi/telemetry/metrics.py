@@ -44,6 +44,8 @@ class RunMetrics:
     verification_violated: int = 0
     verification_unverified: int = 0
     duration_seconds: float | None = None
+    outcome: str | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_record(cls, record: RunRecord) -> RunMetrics:
@@ -59,6 +61,20 @@ class RunMetrics:
 
         statuses = Counter(item.status for item in telemetry.verification)
         context_tokens = telemetry.context_tokens
+
+        usage: dict[str, Any] = {
+            "agent_host": telemetry.agent_host,
+            "model": telemetry.model,
+            "input_tokens": telemetry.input_tokens or None,
+            "output_tokens": telemetry.output_tokens or None,
+            "cached_tokens": telemetry.cached_tokens or None,
+            "cost_usd": telemetry.cost_usd,
+            # Provenance note: values are host/model-reported measurements;
+            # None means nothing was reported, not zero consumption.
+            "provenance": "host-reported"
+            if (telemetry.input_tokens or telemetry.cost_usd)
+            else "unreported",
+        }
 
         return cls(
             run_id=record.run_id,
@@ -78,6 +94,8 @@ class RunMetrics:
             verification_violated=statuses.get("VIOLATED", 0),
             verification_unverified=statuses.get("UNVERIFIED", 0),
             duration_seconds=duration,
+            outcome=record.telemetry.outcome,
+            usage=usage,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -109,6 +127,8 @@ class RunMetrics:
                 "unverified": self.verification_unverified,
             },
             "duration_seconds": self.duration_seconds,
+            "outcome": self.outcome,
+            "usage": dict(self.usage),
         }
 
     def render(self) -> str:
@@ -143,4 +163,11 @@ class RunMetrics:
         )
         if self.duration_seconds is not None:
             lines.append(f"  Duration: {self.duration_seconds}s")
+        usage = self.usage
+        if usage.get("provenance") == "host-reported":
+            lines.append(
+                f"  Usage: in={usage.get('input_tokens')} "
+                f"out={usage.get('output_tokens')} "
+                f"cost=${usage.get('cost_usd')} ({usage.get('model')})"
+            )
         return "\n".join(lines)

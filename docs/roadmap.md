@@ -44,11 +44,20 @@
 
 1. Verification staleness: a verification watermark (event sequence + worktree
    fingerprint) that invalidates evidence when the repository changes afterward.
+   *Done with limitations:* the fingerprint is now content-sensitive (hashes
+   staged/unstaged diff contents plus untracked file content hashes, not just
+   filenames) and the completion gate compares `git_head` as well as `diff_hash`,
+   so verify→edit-an-already-dirty-file→complete and verify→commit→complete
+   are both rejected.
 2. Governor severity levels (INFO/WARNING/HIGH/CRITICAL) wired into the gate.
 3. Session-bound hooks (explicit run/session ids instead of newest-run-wins).
 4. Worktree reconciliation: derive file modifications from actual Git state after
    mutation-capable tools, not just agent reports.
 5. Patch assessment: deleted/weakened tests, dependency manifest changes, risk tiers.
+   *Done:* assessment is now automatic inside `verify()` (not only via explicit
+   `sogi patch`), persisted with its warnings in one transaction, deduped against
+   the governor and prior assessments, and tied to the content-sensitive
+   snapshot so unacknowledged HIGH/CRITICAL findings block completion.
 6. Repository-local configuration (`.sogi.toml`) and `sogi doctor`.
 7. CI across supported Python versions with warnings-as-errors.
 

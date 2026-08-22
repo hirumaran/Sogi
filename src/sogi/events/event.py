@@ -24,6 +24,7 @@ EVENT_TYPES = frozenset(
         "warning_raised",
         "verification_started",
         "verification_result",
+        "usage_recorded",
         "run_completed",
     }
 )

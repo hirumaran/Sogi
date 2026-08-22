@@ -89,6 +89,10 @@ def reduce_event(record: RunRecord | None, event: Event) -> RunRecord:
         elif payload.get("kind") == "acknowledge":
             key = f"{payload.get('warning_kind')}:{payload.get('subject')}"
             record.state.acknowledged[key] = event.timestamp
+        elif payload.get("kind") == "patch_assessment":
+            # Audit marker only: the assessment dict lives in the snapshot
+            # (SNAPSHOT_ONLY_FIELDS), so it must not synthesize a fake decision.
+            pass
         else:
             record.state.decisions.append(str(payload.get("decision")))
 
@@ -124,6 +128,21 @@ def reduce_event(record: RunRecord | None, event: Event) -> RunRecord:
 
     elif kind == "verification_started":
         pass  # marker only
+
+    elif kind == "usage_recorded":
+        telemetry = record.telemetry
+        if payload.get("agent_host"):
+            telemetry.agent_host = str(payload["agent_host"])
+        if payload.get("agent_version"):
+            telemetry.agent_version = str(payload["agent_version"])
+        if payload.get("model"):
+            telemetry.model = str(payload["model"])
+        telemetry.input_tokens += int(payload.get("input_tokens", 0))
+        telemetry.output_tokens += int(payload.get("output_tokens", 0))
+        telemetry.cached_tokens += int(payload.get("cached_tokens", 0))
+        cost = payload.get("cost_usd")
+        if cost is not None:
+            telemetry.cost_usd = round((telemetry.cost_usd or 0.0) + float(cost), 6)
 
     elif kind == "verification_result":
         evidence = tuple(payload.get("evidence", ()))

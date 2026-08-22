@@ -17,6 +17,7 @@ import threading
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from sogi.context.compiler import CompiledContext, ContextCompiler
 from sogi.core.phases import EngineeringPhase
@@ -32,6 +33,7 @@ from sogi.core.task_spec import TaskSpec
 from sogi.events.event import Event
 from sogi.events.log import EventLog
 from sogi.governor import Governor
+from sogi.patch import PatchAssessment, analyze_patch
 from sogi.repository.provider import RepositoryProvider
 from sogi.repository.tree_sitter_provider import AnalyzerCommandError, TreeSitterProvider
 from sogi.repository.worktree import capture_fingerprint
@@ -67,6 +69,105 @@ class CompletionGateError(RuntimeError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _patch_warning_specs(assessment: PatchAssessment) -> list[tuple[str, str, str, str]]:
+    """Deterministic ``(kind, subject, message, severity)`` findings for a patch.
+
+    A single source of truth shared by ``verify()`` (automatic) and
+    ``assess_patch()`` (explicit) so both entry points emit byte-identical
+    ``kind:subject`` signatures and dedup against each other and the governor.
+    """
+    specs: list[tuple[str, str, str, str]] = []
+    for path in assessment.tests_deleted:
+        specs.append(
+            (
+                "test_tampering",
+                path,
+                f"Test file deleted: {path}. Deleting tests to make a task pass "
+                "is never acceptable.",
+                "CRITICAL",
+            )
+        )
+    for path in assessment.tests_weakened:
+        specs.append(
+            (
+                "test_tampering",
+                path,
+                f"Test weakened in {path}: assertions removed or skip/xfail added.",
+                "CRITICAL",
+            )
+        )
+    for manifest in assessment.dependency_changes:
+        specs.append(
+            (
+                "dependency_change",
+                manifest,
+                f"Dependency manifest modified: {manifest}. New dependencies "
+                "require explicit approval.",
+                "HIGH",
+            )
+        )
+    for path in assessment.unexpected_files:
+        if TEST_FILE_LIKE.match(path):
+            continue  # test files get tampering checks, not scope noise
+        specs.append(
+            (
+                "scope_expansion",
+                path,
+                f"{path} appears unrelated to the requested task.",
+                "HIGH",
+            )
+        )
+    return specs
+
+
+def _apply_patch_warnings(
+    rec: RunRecord, now: str, specs: list[tuple[str, str, str, str]]
+) -> list[Event]:
+    """Append patch-assessment warnings to the record, deduping by signature.
+
+    Shared by ``verify()`` (automatic) and ``assess_patch()`` (explicit). A
+    finding whose ``kind:subject`` is already on the record is skipped, so
+    re-running either path (or the governor afterwards) raises no duplicates.
+    """
+    existing = {
+        f"{warning.kind}:{warning.subject}"
+        for warning in rec.telemetry.warnings
+        if warning.subject is not None
+    }
+    events: list[Event] = []
+    for kind, subject, message, severity in specs:
+        signature = f"{kind}:{subject}"
+        if signature in existing:
+            continue
+        rec.telemetry.warnings.append(
+            WarningRecord(
+                kind=kind, message=message, timestamp=now, subject=subject, severity=severity
+            )
+        )
+        existing.add(signature)
+        events.append(
+            Event(
+                type="warning_raised",
+                run_id=rec.run_id,
+                timestamp=now,
+                payload={"kind": kind, "message": message, "severity": severity},
+            )
+        )
+    return events
+
+
+def _analyze_patch_safe(repo_root: Path, expected: tuple[str, ...]) -> PatchAssessment:
+    """Assess the working tree, degrading to an empty LOW assessment on failure.
+
+    Mirrors ``capture_fingerprint``'s graceful degradation: a missing or flaky
+    git binary must not prevent the verification snapshot from persisting.
+    """
+    try:
+        return analyze_patch(repo_root, base="HEAD", expected_files=expected)
+    except (RuntimeError, OSError):
+        return PatchAssessment()
 
 
 class RunService:
@@ -289,65 +390,36 @@ class RunService:
         test_tampering findings, dependency-manifest edits become HIGH
         dependency_change findings, unexpected paths become HIGH
         scope_expansion findings. All are auditable events.
-        """
-        from sogi.patch import analyze_patch
 
+        The assessment and its warnings persist in a single transaction, and
+        the warning signatures match those ``verify()`` raises automatically, so
+        running ``sogi patch`` and ``sogi verify`` in either order is idempotent.
+        """
         record = self.get(run_id)
         expected: tuple[str, ...] = ()
         if record.context is not None:
             expected = tuple(record.context.related_files)
             expected += tuple(record.context.related_tests)
-        assessment = analyze_patch(self.repo_root, base=base, expected_files=expected)
+        try:
+            assessment = analyze_patch(self.repo_root, base=base, expected_files=expected)
+        except (RuntimeError, OSError):
+            assessment = PatchAssessment()
+        specs = _patch_warning_specs(assessment)
 
         def mutate(rec: RunRecord, now: str) -> list[Event]:
             rec.telemetry.patch_assessment = assessment.to_dict()
-            return [
+            events = _apply_patch_warnings(rec, now, specs)
+            events.append(
                 Event(
                     type="decision_recorded",
                     run_id=run_id,
                     timestamp=now,
                     payload={"kind": "patch_assessment", "risk": assessment.risk},
                 )
-            ]
+            )
+            return events
 
         self._mutate(run_id, mutate)
-
-        for path in assessment.tests_deleted:
-            self.raise_warning(
-                run_id,
-                "test_tampering",
-                f"Test file deleted: {path}. Deleting tests to make a task pass "
-                "is never acceptable.",
-                subject=path,
-                severity="CRITICAL",
-            )
-        for path in assessment.tests_weakened:
-            self.raise_warning(
-                run_id,
-                "test_tampering",
-                f"Test weakened in {path}: assertions removed or skip/xfail added.",
-                subject=path,
-                severity="CRITICAL",
-            )
-        for manifest in assessment.dependency_changes:
-            self.raise_warning(
-                run_id,
-                "dependency_change",
-                f"Dependency manifest modified: {manifest}. New dependencies "
-                "require explicit approval.",
-                subject=manifest,
-                severity="HIGH",
-            )
-        for path in assessment.unexpected_files:
-            if TEST_FILE_LIKE.match(path):
-                continue  # test files get tampering checks, not scope noise
-            self.raise_warning(
-                run_id,
-                "scope_expansion",
-                f"{path} appears unrelated to the requested task.",
-                subject=path,
-                severity="HIGH",
-            )
         return assessment.to_dict()
 
     def acknowledge(self, run_id: str, kind: str, subject: str) -> None:
@@ -615,6 +687,46 @@ class RunService:
 
         self._mutate(run_id, mutate)
 
+    def record_usage(
+        self,
+        run_id: str,
+        *,
+        agent_host: str | None = None,
+        agent_version: str | None = None,
+        model: str | None = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cached_tokens: int = 0,
+        cost_usd: float | None = None,
+    ) -> None:
+        """Record host/model-reported usage. Values accumulate across calls."""
+        usage: dict[str, Any] = {
+            "agent_host": agent_host,
+            "agent_version": agent_version,
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
+            "cost_usd": cost_usd,
+        }
+
+        def mutate(record: RunRecord, now: str) -> list[Event]:
+            telemetry = record.telemetry
+            if agent_host:
+                telemetry.agent_host = agent_host
+            if agent_version:
+                telemetry.agent_version = agent_version
+            if model:
+                telemetry.model = model
+            telemetry.input_tokens += input_tokens
+            telemetry.output_tokens += output_tokens
+            telemetry.cached_tokens += cached_tokens
+            if cost_usd is not None:
+                telemetry.cost_usd = round((telemetry.cost_usd or 0.0) + cost_usd, 6)
+            return [Event(type="usage_recorded", run_id=run_id, timestamp=now, payload=usage)]
+
+        self._mutate(run_id, mutate)
+
     def record_failed_approach(self, run_id: str, approach: str) -> None:
         """Record an approach that was tried and failed."""
 
@@ -703,6 +815,18 @@ class RunService:
             record, checks=discovered + configured
         )
         fingerprint = capture_fingerprint(self.repo_root)
+        # Assess the working-tree patch independently of the agent's claims, so
+        # an agent cannot skip tampering/scope/dependency scrutiny by simply
+        # never calling ``sogi patch``. Computed outside the mutate closure so
+        # the cross-process lock is not held during git I/O; only the
+        # persistence below needs to be one transaction. base="HEAD" matches
+        # the fingerprint's HEAD, so assessment and watermark share a revision.
+        expected: tuple[str, ...] = ()
+        if record.context is not None:
+            expected = tuple(record.context.related_files)
+            expected += tuple(record.context.related_tests)
+        assessment = _analyze_patch_safe(self.repo_root, expected)
+        patch_specs = _patch_warning_specs(assessment)
 
         def mutate(rec: RunRecord, now: str) -> list[Event]:
             rec.telemetry.last_verification_outcome = report.outcome
@@ -777,6 +901,20 @@ class RunService:
                         },
                     )
                 )
+            # Persist the assessment and raise its findings in the same
+            # transaction as the snapshot, so evidence and scrutiny commit or
+            # roll back together. Dedup means a prior `sogi patch` does not
+            # produce duplicate findings here.
+            rec.telemetry.patch_assessment = assessment.to_dict()
+            events.extend(_apply_patch_warnings(rec, now, patch_specs))
+            events.append(
+                Event(
+                    type="decision_recorded",
+                    run_id=run_id,
+                    timestamp=now,
+                    payload={"kind": "patch_assessment", "risk": assessment.risk},
+                )
+            )
             return events
 
         self._mutate(run_id, mutate)
