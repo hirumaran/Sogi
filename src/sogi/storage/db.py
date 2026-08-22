@@ -208,6 +208,22 @@ class SogiDatabase:
             ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
+    def last_sequence_of_type(self, run_id: str, event_type: str) -> int | None:
+        """Latest sequence for an event type; None when it never occurred."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(sequence) AS seq FROM events WHERE run_id = ? AND type = ?",
+                (run_id, event_type),
+            ).fetchone()
+        return int(row["seq"]) if row and row["seq"] is not None else None
+
+    def max_sequence(self, run_id: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(sequence) AS seq FROM events WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return int(row["seq"]) if row and row["seq"] is not None else 0
+
     def all_events(self) -> list[Event]:
         with self._connect() as conn:
             rows = conn.execute(

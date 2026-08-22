@@ -23,7 +23,7 @@ class WorktreeFingerprint:
     git_head: str | None
     diff_hash: str | None
 
-    def matches(self, other: "WorktreeFingerprint | None") -> bool | None:
+    def matches(self, other: WorktreeFingerprint | None) -> bool | None:
         """True/False when comparable; None when either side is unavailable."""
         if other is None or self.diff_hash is None or other.diff_hash is None:
             return None
@@ -44,9 +44,7 @@ def capture_fingerprint(repo_root: Path) -> WorktreeFingerprint:
             ],
         )
     )
-    diff_hash = (
-        hashlib.sha256(changed.encode("utf-8")).hexdigest()[:16] if head else None
-    )
+    diff_hash = hashlib.sha256(changed.encode("utf-8")).hexdigest()[:16] if head else None
     return WorktreeFingerprint(git_head=head, diff_hash=diff_hash)
 
 

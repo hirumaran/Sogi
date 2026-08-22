@@ -24,6 +24,7 @@ from sogi.core.run_record import (
     RunRecord,
     Telemetry,
     VerificationRecord,
+    VerificationSnapshot,
     WarningRecord,
 )
 from sogi.core.task_spec import TaskSpec
@@ -32,6 +33,7 @@ from sogi.events.log import EventLog
 from sogi.governor import Governor
 from sogi.repository.provider import RepositoryProvider
 from sogi.repository.tree_sitter_provider import AnalyzerCommandError, TreeSitterProvider
+from sogi.repository.worktree import capture_fingerprint
 from sogi.state.engineering_state import EngineeringState
 from sogi.storage.db import SogiDatabase
 from sogi.verification.discovery import DiscoveredCheck
@@ -276,6 +278,7 @@ class RunService:
                 "No independent verification has run for this task.",
                 remediation="Run `sogi verify <run_id>` (or the verify tool) before completing.",
             )
+        self._check_stale(record)
         if outcome in {"FAIL", "INCONCLUSIVE"}:
             raise CompletionGateError(
                 f"Verification outcome is {outcome}.",
@@ -288,6 +291,36 @@ class RunService:
                     "Add evidence for those criteria and re-verify, or accept them "
                     "explicitly with allow_unverified=True."
                 ),
+            )
+
+    def _check_stale(self, record: RunRecord) -> None:
+        """Reject evidence that predates later repository changes.
+
+        Two independent drift signals:
+        - the event stream advanced past the watermark via file_modified;
+        - the worktree fingerprint changed since verification ran.
+        """
+        snapshot = record.telemetry.verification_snapshot
+        if snapshot is None:
+            return
+        run_id = record.run_id
+
+        last_modification = self.db.last_sequence_of_type(run_id, "file_modified")
+        if last_modification is not None and last_modification > snapshot.event_sequence:
+            raise CompletionGateError(
+                "Verification is stale: files changed after the last verify.",
+                remediation="Re-run `sogi verify <run_id>` to refresh the evidence.",
+            )
+
+        current = capture_fingerprint(self.repo_root)
+        if (
+            snapshot.diff_hash is not None
+            and current.diff_hash is not None
+            and current.diff_hash != snapshot.diff_hash
+        ):
+            raise CompletionGateError(
+                "Verification is stale: the repository worktree changed after the last verify.",
+                remediation="Re-run `sogi verify <run_id>` to refresh the evidence.",
             )
 
     def _clear_active_run(self, run_id: str) -> None:
@@ -521,9 +554,17 @@ class RunService:
         """
         record = self.get(run_id)
         report = Verifier(self.repo_root, timeout=timeout).verify(record, checks=checks)
+        fingerprint = capture_fingerprint(self.repo_root)
 
         def mutate(rec: RunRecord, now: str) -> list[Event]:
             rec.telemetry.last_verification_outcome = report.outcome
+            rec.telemetry.verification_snapshot = VerificationSnapshot(
+                event_sequence=self.db.max_sequence(run_id),
+                verified_at=now,
+                git_head=fingerprint.git_head,
+                diff_hash=fingerprint.diff_hash,
+                outcome=report.outcome,
+            )
             events: list[Event] = [
                 Event(
                     type="verification_started",

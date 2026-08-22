@@ -300,3 +300,53 @@ def test_run_ids_are_unique(service: RunService) -> None:
 def test_repo_must_exist(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         RunService(tmp_path / "missing")
+
+
+def test_complete_rejected_when_files_change_after_verify(repo: Path) -> None:
+    """The verify -> edit -> complete sequence must be rejected as stale."""
+    from fakes import FakeProvider
+
+    from sogi.runs.service import RunService
+    from sogi.verification.discovery import DiscoveredCheck
+
+    service = RunService(repo, provider=FakeProvider(repo))
+    run_id = service.start(
+        "Fix auth",
+        acceptance_criteria=("Auth behavior works",),
+        compile_context=False,
+    ).run_id
+
+    passing = DiscoveredCheck(name="t", command="exit 0", kind="test")
+    service.verify(run_id, checks=(passing,))
+
+    # The agent edits after verification: evidence is now stale.
+    service.record_file_modified(run_id, "src/auth.py")
+
+    from sogi.runs.service import CompletionGateError as CGE
+
+    with pytest.raises(CGE) as excinfo:
+        service.complete(run_id, allow_unverified=True)
+    assert "stale" in str(excinfo.value)
+
+    # Re-verifying refreshes the watermark and completion succeeds.
+    service.verify(run_id, checks=(passing,))
+    record = service.complete(run_id, allow_unverified=True)
+    assert record.telemetry.outcome == "completed_with_unverified"
+
+
+def test_verification_snapshot_records_watermark(service: RunService) -> None:
+    from sogi.verification.discovery import DiscoveredCheck
+
+    run_id = service.start("Fix auth", compile_context=False).run_id
+    service.record_file_modified(run_id, "src/auth.py")
+
+    service.verify(
+        run_id,
+        checks=(DiscoveredCheck(name="t", command="exit 0", kind="test"),),
+    )
+
+    snapshot = service.get(run_id).telemetry.verification_snapshot
+    assert snapshot is not None
+    # Watermark sits at the file_modified event: task_created(1), file_modified(2).
+    assert snapshot.event_sequence == 2
+    assert snapshot.outcome in {"PASS", "PASS_WITH_UNVERIFIED"}
